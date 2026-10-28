@@ -8,6 +8,7 @@ import shutil
 import logging
 import sqlite3
 import threading
+from contextlib import closing
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Tuple
@@ -161,7 +162,7 @@ def query_offline_core_lexicon(term: str) -> str:
     if not os.path.exists(OFFLINE_CORE_DB):
         return ""
     try:
-        with sqlite3.connect(OFFLINE_CORE_DB) as conn:
+        with closing(sqlite3.connect(OFFLINE_CORE_DB)) as conn:
             cur = conn.execute("SELECT fa FROM en_fa_lexicon WHERE term = ?", (term.strip().lower(),))
             row = cur.fetchone()
             return row[0] if row else ""
@@ -174,7 +175,7 @@ def query_offline_bnc_collocations(headword: str) -> List[Dict[str, str]]:
     if not os.path.exists(OFFLINE_CORE_DB):
         return []
     try:
-        with sqlite3.connect(OFFLINE_CORE_DB) as conn:
+        with closing(sqlite3.connect(OFFLINE_CORE_DB)) as conn:
             cur = conn.execute(
                 "SELECT collocation, example_en FROM bnc_collocations WHERE headword = ?",
                 (headword.strip().lower(),),
