@@ -16,6 +16,12 @@ LINUX
   ./run.sh              start the app
   ./build_linux.sh      optional portable build in dist/Ocean/
 
+YOUR DATA
+  History, favourites, your translation fixes, settings and the log file (ocean.log)
+  are stored per user, so updating or rebuilding the app never touches them:
+      Windows: %APPDATA%\Ocean        Linux: ~/.local/share/Ocean
+  Data from older versions (kept next to the app) is copied there on first start.
+
 OFFLINE MODE
   Online dictionaries and Google Translate are used when available. Without
   internet, Persian translation falls back to the bundled NLLB-200 model in

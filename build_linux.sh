@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 pkill -x Ocean 2>/dev/null || true
 
-# Keep history/memory written by a previous build's exe if it is newer than the source copy.
+# Older versions kept history/memory next to the exe: save it before the rebuild wipes dist/ (migrated on next start).
 for f in lexicon_vault.db user_memory.json; do
     if [ -f "dist/Ocean/$f" ] && { [ ! -f "$f" ] || [ "dist/Ocean/$f" -nt "$f" ]; }; then
         cp -f "dist/Ocean/$f" "$f"
@@ -24,7 +24,8 @@ done
     "${collect[@]}" --name Ocean app.py
 
 # Data files live next to the executable (app.get_base_dir / lexical_engine._get_engine_base_dir look there).
-for f in offline_lexicon.json user_memory.json ocean_offline_core.db lexicon_vault.db ocean_settings.json \
+# User data (history, memory, settings) lives in ~/.local/share/Ocean, not in the build.
+for f in offline_lexicon.json ocean_offline_core.db \
          kokoro-v1.0.onnx voices-v1.0.bin; do
     [ -f "$f" ] && cp -f "$f" dist/Ocean/
 done
