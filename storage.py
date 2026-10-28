@@ -10,8 +10,19 @@ from typing import Any, Dict, Iterator, List, Optional
 import lexical_engine
 
 
+SORT_RECENT = "recent"
+SORT_MOST_LOOKED_UP = "most_looked_up"
+
+
 class HistoryStore:
-    """Looked-up entries: history plus the favourites flag."""
+    """Looked-up entries: history plus the favourites flag and a per-entry lookup counter.
+
+    What counts as a lookup: a user-initiated one (typing a term, picking a suggestion, clicking a
+    history row, candidate or related word, the global hotkey), whether it was fetched fresh or served
+    from this store's cache. Re-rendering an entry, toggling its star, refreshing it, deep-searching it
+    again and back/forward navigation are not lookups. The UI calls record_lookup() for each lookup;
+    save_entry() never touches the counter, so storing a fresh or refreshed result cannot inflate it.
+    """
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -43,6 +54,19 @@ class HistoryStore:
                 )
                 """
             )
+            self._add_column_if_missing(conn, "lookup_count", "INTEGER NOT NULL DEFAULT 1")
+
+    @staticmethod
+    def _add_column_if_missing(conn: sqlite3.Connection, name: str, definition: str) -> None:
+        """Guarded, idempotent migration: older databases gain the column (existing rows get its default)."""
+        if name in {row[1] for row in conn.execute("PRAGMA table_info(lexicon)")}:
+            return
+        try:
+            conn.execute(f"ALTER TABLE lexicon ADD COLUMN {name} {definition}")
+        except sqlite3.OperationalError:
+            # Another process may have added it between the check and the ALTER.
+            if name not in {row[1] for row in conn.execute("PRAGMA table_info(lexicon)")}:
+                raise
 
     def save_entry(self, term: str, payload: Dict[str, Any]) -> None:
         key = term.strip().lower()
@@ -62,6 +86,17 @@ class HistoryStore:
                     updated_at = excluded.updated_at
                 """,
                 (key, payload.get("headword", term.strip()), json_str, fav, now),
+            )
+
+    def record_lookup(self, term: str) -> None:
+        """Count one user-initiated lookup of an existing entry and move it to the top of the recent list.
+        A term not stored yet is ignored: save_entry() creates it with a count of 1."""
+        key = term.strip().lower()
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE lexicon SET lookup_count = lookup_count + 1, updated_at = ? WHERE query_key = ?",
+                (now, key),
             )
 
     def get_entry(self, term: str) -> Optional[Dict[str, Any]]:
@@ -116,19 +151,47 @@ class HistoryStore:
                     break
         return matches
 
-    def list_entries(self, favorites_only: bool = False) -> List[Dict[str, Any]]:
-        query = "SELECT query_key, display_term, is_favorite, updated_at FROM lexicon"
+    def list_entries(
+        self, favorites_only: bool = False, query: str = "", sort: str = SORT_RECENT
+    ) -> List[Dict[str, Any]]:
+        """History rows, optionally narrowed to favourites and to those matching `query`, in `sort` order.
+
+        `query` is a case-insensitive substring match on the English/display term and on the Persian
+        meaning; Persian is compared through lexical_engine.fa_key so Arabic/Persian letter variants,
+        diacritics and zero-width joiners do not matter. SORT_RECENT is newest first; SORT_MOST_LOOKED_UP
+        is highest lookup count first, ties broken by recency."""
+        sql = "SELECT query_key, display_term, is_favorite, updated_at, lookup_count"
+        needle = lexical_engine.fa_key(query).lower()
+        if needle:
+            sql += ", payload"
+        sql += " FROM lexicon"
         if favorites_only:
-            query += " WHERE is_favorite = 1"
-        query += " ORDER BY updated_at DESC"
+            sql += " WHERE is_favorite = 1"
+        if sort == SORT_MOST_LOOKED_UP:
+            sql += " ORDER BY lookup_count DESC, updated_at DESC, id DESC"
+        else:
+            sql += " ORDER BY updated_at DESC, id DESC"
         with self._conn() as conn:
-            rows = conn.execute(query).fetchall()
+            rows = conn.execute(sql).fetchall()
+        if needle:
+            rows = [r for r in rows if self._matches(needle, r[0], r[1], r[5])]
         return [
             {
                 "query_key": r[0],
                 "display_term": r[1],
                 "is_favorite": bool(r[2]),
                 "updated_at": r[3],
+                "lookup_count": r[4],
             }
             for r in rows
         ]
+
+    @staticmethod
+    def _matches(needle: str, query_key: str, display_term: str, payload: str) -> bool:
+        if needle in query_key or needle in lexical_engine.fa_key(display_term).lower():
+            return True
+        try:
+            persian = json.loads(payload).get("persian_equivalent", "")
+        except (ValueError, AttributeError):
+            return False
+        return isinstance(persian, str) and needle in lexical_engine.fa_key(persian).lower()
