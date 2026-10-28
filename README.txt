@@ -57,6 +57,15 @@ LOOK UP FROM ANY APP (Ctrl+Alt+O)
     Other Linux desktops: bind any key to  <ocean folder>/run.sh --lookup
   You can also run:  run.sh --lookup <text>
 
+REFRESHING SAVED ENTRIES
+  Saved lookups are fetched again when they are older than the period set in
+  Menu > Settings > Refresh Saved Entries (Never / 1 week / 1 month / 3 months /
+  6 months; default 3 months), or when they were produced by an older version of
+  Ocean's lookup engine, so fixes and improvements reach old entries. "Never"
+  turns refreshing off. Your star, review progress and Persian edits are kept.
+  If the refetch fails (e.g. you are offline) or finds nothing, the saved copy is
+  shown and refreshed on a later lookup.
+
 YOUR DATA
   History, favourites, your translation fixes, settings and the log file (ocean.log)
   are stored per user, so updating or rebuilding the app never touches them:

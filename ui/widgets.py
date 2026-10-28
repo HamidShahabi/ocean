@@ -385,7 +385,7 @@ class PersianTranslationWidget(QWidget):
                         item["fa"] = new_fa
                     if item.get("example_en") == self.en_source:
                         item["example_fa"] = new_fa
-            self.main_win.db.save_entry(self.main_win.current_term, d)
+            self.main_win.db.save_entry(self.main_win.current_term, d, fetched=False)
 
     def enterEvent(self, event) -> None:
         if self.mode == "Hover to Reveal Persian" and not self.revealed:
