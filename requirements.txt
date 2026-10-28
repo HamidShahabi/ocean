@@ -1,0 +1,12 @@
+PyQt6>=6.6.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+kokoro-onnx>=0.3.0
+soundfile>=0.12.1
+numpy>=1.26.0
+nltk>=3.8.1
+eng-to-ipa>=0.0.2
+ctranslate2>=4.0.0
+sentencepiece>=0.2.0
+pywin32>=306; sys_platform == "win32"

@@ -1,0 +1,25 @@
+# Python / build
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+release/
+*.spec
+ocean.ico
+
+# Downloaded by setup_linux.sh / setup_windows.ps1 (too large for git)
+kokoro-v1.0.onnx
+voices-v1.0.bin
+*.part
+nltk_data/
+offline_mt_model/
+
+# Personal data written at runtime
+lexicon_vault.db*
+user_memory.json
+ocean_settings.json
+ocean_offline_core.db
+
+# Original single-file source dump
+Ocean_Full_Source_Code.txt

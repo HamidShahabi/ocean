@@ -1,0 +1,1645 @@
+# === SECTION 1: IMPORTS, OFFLINE DATA PATHS & PERSISTENT SESSIONS ===
+import os
+import re
+import sys
+import html
+import json
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Any, List, Tuple
+import requests
+from requests.adapters import HTTPAdapter
+from bs4 import BeautifulSoup
+
+
+def _get_engine_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        if os.path.exists(os.path.join(exe_dir, "offline_lexicon.json")):
+            return exe_dir
+        parent = os.path.abspath(os.path.join(exe_dir, "..", ".."))
+        if os.path.exists(os.path.join(parent, "offline_lexicon.json")):
+            return parent
+        return exe_dir
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+ENGINE_BASE_DIR = _get_engine_base_dir()
+USER_MEMORY_FILE = os.path.join(ENGINE_BASE_DIR, "user_memory.json")
+OFFLINE_LEXICON_FILE = os.path.join(ENGINE_BASE_DIR, "offline_lexicon.json")
+OFFLINE_CORE_DB = os.path.join(ENGINE_BASE_DIR, "ocean_offline_core.db")
+OFFLINE_MT_DIR = os.path.join(ENGINE_BASE_DIR, "offline_mt_model")
+
+try:
+    import nltk
+    for cand_nltk in (
+        os.path.join(ENGINE_BASE_DIR, "nltk_data"),
+        os.path.join(os.path.dirname(sys.executable), "nltk_data") if getattr(sys, "frozen", False) else "",
+        os.path.join(os.path.dirname(sys.executable), "_internal", "nltk_data") if getattr(sys, "frozen", False) else "",
+    ):
+        if cand_nltk and os.path.isdir(cand_nltk) and cand_nltk not in nltk.data.path:
+            nltk.data.path.insert(0, cand_nltk)
+    from nltk.corpus import wordnet as wn
+    from nltk.stem import WordNetLemmatizer
+    LEMMATIZER = WordNetLemmatizer()
+except Exception:
+    wn = None
+    LEMMATIZER = None
+
+try:
+    import eng_to_ipa as ipa_engine
+except Exception:
+    ipa_engine = None
+
+try:
+    import ctranslate2
+    import sentencepiece as spm
+    HAS_CT2_BACKUP = True
+except Exception:
+    HAS_CT2_BACKUP = False
+
+_CT2_TRANSLATOR = None
+_SP_PROCESSOR = None
+_CT2_IS_NLLB = False  # NLLB models need eng_Latn/pes_Arab language tokens; Marian-style models don't.
+
+
+def load_json_safe(path: str, default: Dict[str, Any]) -> Dict[str, Any]:
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return dict(default)
+
+
+OFFLINE_LEXICON = load_json_safe(OFFLINE_LEXICON_FILE, {"idioms": {}, "words": {}, "curated_senses": {}})
+USER_MEMORY = load_json_safe(USER_MEMORY_FILE, {"entries": {}, "overrides": {}})
+
+
+def query_offline_core_lexicon(term: str) -> str:
+    if not os.path.exists(OFFLINE_CORE_DB):
+        return ""
+    try:
+        with sqlite3.connect(OFFLINE_CORE_DB) as conn:
+            cur = conn.execute("SELECT fa FROM en_fa_lexicon WHERE term = ?", (term.strip().lower(),))
+            row = cur.fetchone()
+            return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+def query_offline_bnc_collocations(headword: str) -> List[Dict[str, str]]:
+    if not os.path.exists(OFFLINE_CORE_DB):
+        return []
+    try:
+        with sqlite3.connect(OFFLINE_CORE_DB) as conn:
+            cur = conn.execute(
+                "SELECT collocation, example_en FROM bnc_collocations WHERE headword = ?",
+                (headword.strip().lower(),),
+            )
+            return [{"term": r[0], "example_en": r[1]} for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def translate_offline_backup(text: str, is_short: bool = False) -> str:
+    """Used strictly as a backup when internet connection is unavailable."""
+    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB
+    clean = text.strip()
+    if not clean:
+        return ""
+    db_hit = query_offline_core_lexicon(clean.lower())
+    if db_hit:
+        return normalize_persian(db_hit, is_short_term=is_short, source_en=clean)
+    if HAS_CT2_BACKUP:
+        try:
+            if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
+                sp_p = os.path.join(OFFLINE_MT_DIR, "sentencepiece.model")
+                md_p = os.path.join(OFFLINE_MT_DIR, "model")
+                if os.path.exists(sp_p) and os.path.isdir(md_p):
+                    _SP_PROCESSOR = spm.SentencePieceProcessor(model_file=sp_p)
+                    _CT2_TRANSLATOR = ctranslate2.Translator(md_p, device="cpu", compute_type="int8")
+                    vocab_p = os.path.join(md_p, "shared_vocabulary.txt")
+                    if os.path.exists(vocab_p):
+                        with open(vocab_p, encoding="utf-8") as vf:
+                            _CT2_IS_NLLB = any(line.strip() == "pes_Arab" for line in vf)
+            if _CT2_TRANSLATOR is not None and _SP_PROCESSOR is not None:
+                tokens = _SP_PROCESSOR.encode(clean, out_type=str)
+                if _CT2_IS_NLLB:
+                    res = _CT2_TRANSLATOR.translate_batch(
+                        [["eng_Latn"] + tokens + ["</s>"]], target_prefix=[["pes_Arab"]], beam_size=2
+                    )
+                    out_tokens = res[0].hypotheses[0][1:]
+                else:
+                    res = _CT2_TRANSLATOR.translate_batch([tokens], beam_size=2)
+                    out_tokens = res[0].hypotheses[0]
+                decoded = _SP_PROCESSOR.decode(out_tokens)
+                return normalize_persian(decoded, is_short_term=is_short, source_en=clean)
+        except Exception:
+            pass
+    return ""
+
+
+def save_user_memory() -> None:
+    try:
+        with open(USER_MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(USER_MEMORY, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def record_user_override(en_text: str, fa_text: str) -> None:
+    key = en_text.strip().lower()
+    if key and fa_text.strip():
+        USER_MEMORY.setdefault("overrides", {})[key] = fa_text.strip()
+        save_user_memory()
+
+
+def record_taught_entry(term: str, fa_equiv: str, pos: str, eng_def: str, ex_en: str, ex_fa: str) -> None:
+    key = term.strip().lower()
+    if not key:
+        return
+    USER_MEMORY.setdefault("entries", {})[key] = {
+        "headword": term.strip(),
+        "fa": fa_equiv.strip(),
+        "pos": pos.strip() or "Entry",
+        "def": eng_def.strip(),
+        "example_en": ex_en.strip(),
+        "example_fa": ex_fa.strip(),
+    }
+    if fa_equiv.strip():
+        USER_MEMORY.setdefault("overrides", {})[key] = fa_equiv.strip()
+    save_user_memory()
+
+
+def delete_taught_entry(term: str) -> None:
+    key = term.strip().lower()
+    if key in USER_MEMORY.get("entries", {}):
+        del USER_MEMORY["entries"][key]
+        save_user_memory()
+
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
+}
+
+POOLED_SESSION = requests.Session()
+POOLED_SESSION.headers.update(HEADERS)
+_adapter = HTTPAdapter(pool_connections=25, pool_maxsize=25, max_retries=1)
+POOLED_SESSION.mount("https://", _adapter)
+POOLED_SESSION.mount("http://", _adapter)
+
+DIRECT_SESSION = requests.Session()
+DIRECT_SESSION.trust_env = False
+DIRECT_SESSION.headers.update(HEADERS)
+DIRECT_SESSION.mount("https://", _adapter)
+DIRECT_SESSION.mount("http://", _adapter)
+
+STOPWORDS = {
+    "the", "a", "an", "of", "in", "to", "for", "with", "on", "at", "from", "by",
+    "about", "as", "into", "like", "through", "after", "over", "between", "out",
+    "against", "during", "without", "before", "under", "around", "among", "is",
+    "are", "was", "were", "be", "been", "being", "have", "has", "had", "do",
+    "does", "did", "will", "would", "shall", "should", "can", "could", "may",
+    "might", "must", "that", "this", "these", "those", "it", "its", "they",
+    "them", "their", "he", "him", "his", "she", "her", "we", "us", "our", "you",
+    "your", "i", "me", "my", "or", "and", "but", "if", "so", "than", "too", "very",
+    "such", "more", "most", "other", "some", "any", "no", "not", "only", "own",
+    "little", "real", "less", "good", "bad", "new", "old", "big", "small", "great",
+    "time", "line", "one", "each", "within", "it's", "its"
+}
+
+WEAK_SYNONYMS = {
+    "word", "treatment", "thing", "matter", "item", "part", "piece", "act",
+    "state", "talk", "talking", "tattle", "sing", "blab", "peach", "babble",
+    "short cuts", "press", "gad", "jazz around", "belate", "clingy", "cosy",
+    "bantam", "flyweight", "puny"
+}
+
+PROTECTED_ROOT_WORDS = {
+    "discuss", "discover", "display", "disease", "dispute", "disturb", "distribute",
+    "dispose", "distract", "distant", "distinct", "distinguish", "repeat", "report",
+    "represent", "require", "request", "research", "reside", "resign", "resist",
+    "resolve", "respect", "respond", "restore", "strain", "strict", "retain",
+    "retire", "reveal", "revenge", "reverse", "review", "revise", "prepare",
+    "prefer", "predict", "prevent", "prevail", "preserve", "preside", "pretend",
+    "design", "desire", "deserve", "destroy", "detail", "detect", "determine",
+    "develop", "device", "devote", "deliberate", "deliver", "demand", "demonstrate",
+    "denote", "deny", "depart", "depend", "depict", "deploy", "deposit", "depress",
+    "deprive", "derive", "describe", "desert", "include", "increase", "indicate",
+    "inform", "insist", "inspect", "inspire", "install", "instruct", "intend",
+    "interest", "invent", "invest", "invite", "involve", "express", "explain", "explore"
+}
+
+FALSE_BOUND_STEMS = {
+    "cuss", "ease", "play", "cover", "count", "tract", "pose", "part", "port",
+    "fine", "side", "sent", "sign", "serve", "ceive", "spect", "ject", "duct",
+    "mit", "pel", "scribe", "sist", "stain", "tain", "vert", "vide", "vise",
+    "peat", "liberate", "liver", "mand", "note"
+}
+
+INVALID_FA_HEADERS = {
+    "\u0645\u0639\u0646\u06cc", "\u0645\u0639\u0627\u0646\u06cc", "\u062a\u0631\u062c\u0645\u0647",
+    "\u062a\u0644\u0641\u0638", "\u0645\u062a\u0631\u0627\u062f\u0641", "\u0641\u0631\u0647\u0646\u06af \u0644\u063a\u062a",
+    "\u0627\u0635\u0637\u0644\u0627\u062d", "\u06a9\u0644\u0645\u0647", "\u0639\u0628\u0627\u0631\u062a",
+    "\u06af\u0627\u062f", "\u0633\u0627\u0646\u06af", "\u0628\u06cc \u0644\u06cc\u062a", "\u067e\u0644\u0627\u062a\u0648\u0646",
+    "\u06af\u0648\u067e", "\u06af\u0627\u0646\u06a9", "\u06af\u0648"
+}
+
+CURATED_SYNONYMS_MAP = {
+    "gallivant": ["roam", "wander", "ramble"],
+    "beseech": ["implore", "entreat", "beg"],
+    "snug": ["tight", "close-fitting", "cozy"],
+    "bashful": ["shy", "timid", "diffident"],
+    "platoon": ["squad", "troop", "detachment"],
+    "purse": ["handbag", "pouch"],
+    "gunk": ["grime", "sludge", "muck"],
+}
+
+# === SECTION 2: MORPHOLOGICAL AFFIX RULES & CONTRACTION / PRONOUN IPA MAP ===
+PREFIX_RULES: List[Tuple[str, str]] = [
+    ("inter", "between or among"), ("trans", "across or beyond"), ("super", "above or beyond"),
+    ("under", "below or insufficient"), ("counter", "against or opposite"), ("over", "excessive or above"),
+    ("anti", "against or opposing"), ("auto", "self or automatic"), ("post", "after or behind"),
+    ("semi", "half or partly"), ("multi", "many or multiple"), ("non", "not or absence of"),
+    ("pre", "before or prior to"), ("sub", "under or secondary"), ("mis", "wrongly or badly"),
+    ("dis", "not or opposite of"), ("un", "not or reversal"), ("re", "again or back"),
+    ("in", "not or into"), ("im", "not or into"), ("il", "not"), ("ir", "not"),
+    ("de", "reversal or away"), ("co", "together or jointly"),
+]
+
+SUFFIX_RULES: List[Tuple[str, str, str]] = [
+    ("ation", "Noun", "action, process, or result"), ("ition", "Noun", "action or state"),
+    ("sion", "Noun", "state, condition, or process"), ("tion", "Noun", "action, process, or result"),
+    ("ment", "Noun", "action or resulting state"), ("ness", "Noun", "state, quality, or condition"),
+    ("able", "Adjective", "capable of or worthy of"), ("ible", "Adjective", "capable of being"),
+    ("ious", "Adjective", "characterized by or full of"), ("less", "Adjective", "without or lacking"),
+    ("ship", "Noun", "state, office, or skill"), ("ence", "Noun", "action, state, or quality"),
+    ("ance", "Noun", "action, state, or quality"), ("ity", "Noun", "quality, state, or degree"),
+    ("ive", "Adjective", "tending to or having the nature of"), ("ous", "Adjective", "full of or possessing"),
+    ("ful", "Adjective", "full of or characterized by"), ("ize", "Verb", "cause to become"),
+    ("ise", "Verb", "cause to become"), ("ify", "Verb", "make or become"),
+    ("ate", "Verb / Adj", "cause to become"), ("ing", "Gerund / Participle", "ongoing action or process"),
+    ("ed", "Past / Adjective", "completed action or state"), ("al", "Adjective / Noun", "relating to"),
+    ("ic", "Adjective", "pertaining to"), ("er", "Noun", "person or thing performing an action"),
+    ("or", "Noun", "person or thing performing an action"), ("ly", "Adverb", "in a specified manner"),
+    ("ion", "Noun", "action, process, or state"),
+]
+
+WEAK_FORM_IPA = {
+    "a": "\u0259", "an": "\u0259n", "the": "\u00f0\u0259", "to": "t\u0259",
+    "of": "\u0259v", "was": "w\u0259z", "were": "w\u0259r", "her": "h\u0259r",
+    "for": "f\u0259r", "and": "\u0259nd", "that": "\u00f0\u0259t",
+    "us": "\u028cs", "it": "\u026at", "in": "\u026an", "is": "\u026az",
+    "don't": "do\u028ant", "doesn't": "\u02c8d\u028cz\u0259nt", "didn't": "\u02c8d\u026ad\u0259nt",
+    "won't": "wo\u028ant", "can't": "k\u00e6nt", "couldn't": "\u02c8k\u028ad\u0259nt",
+    "shouldn't": "\u02c8\u0283\u028ad\u0259nt", "wouldn't": "\u02c8w\u028ad\u0259nt",
+    "isn't": "\u02c8\u026az\u0259nt", "aren't": "\u0251rnt", "wasn't": "\u02c8w\u028cz\u0259nt",
+    "weren't": "w\u025crnt", "haven't": "\u02c8h\u00e6v\u0259nt", "hasn't": "\u02c8h\u00e6z\u0259nt",
+    "hadn't": "\u02c8h\u00e6d\u0259nt", "i'm": "a\u026am", "i'll": "a\u026al",
+    "i've": "a\u026av", "i'd": "a\u026ad", "you're": "j\u028ar", "you'll": "jul",
+    "you've": "juv", "you'd": "jud", "we're": "w\u026ar", "we'll": "wil",
+    "we've": "wiv", "they're": "\u00f0\u025br", "they'll": "\u00f0e\u026al",
+    "they've": "\u00f0e\u026av", "he's": "hiz", "she's": "\u0283iz", "it's": "\u026ats",
+    "that's": "\u00f0\u00e6ts", "there's": "\u00f0\u025brz", "what's": "w\u028cts",
+    "let's": "l\u025bts",
+}
+
+
+# === SECTION 3: NETWORK, SENTENCE AUTO-CORRECTION & SANITIZATION UTILITIES ===
+def smart_request(method: str, url: str, **kwargs) -> requests.Response:
+    """Unblocked hybrid request: tries normal pooled session first, then direct session."""
+    kwargs.setdefault("timeout", 3.0)
+    try:
+        return POOLED_SESSION.request(method, url, **kwargs)
+    except Exception:
+        return DIRECT_SESSION.request(method, url, **kwargs)
+
+
+def normalize_persian(text: str, is_short_term: bool = False, source_en: str = "") -> str:
+    if not text:
+        return ""
+    t = html.unescape(str(text))
+    t = t.replace("\r", " ").replace("\n", " ")
+    t = re.sub(r"[\u064a\u0649]", "\u06cc", t)
+    t = re.sub(r"\u0643", "\u06a9", t)
+    t = re.sub(r"\u200c{2,}", "\u200c", t)
+    t = re.sub(r"^[0-9\u06f0-\u06f9]+[\.\-\)\s]+", "", t)
+    t = re.sub(r"[\.\-\(\s]+[0-9\u06f0-\u06f9]+$", "", t)
+    t = re.sub(r"\s*[0-9\u06f0-\u06f9]+\.\s*", " ", t)
+    t = t.replace("\u067e\u0644\u0627\u062a\u0648\u0646", "\u062f\u0633\u062a\u0647 \u0633\u0631\u0628\u0627\u0632\u0627\u0646")
+    t = re.sub(r"\s+", " ", t).strip()
+    if is_short_term:
+        t = t.rstrip(".\u06d4!?\u061f;:\u061b").strip()
+        if re.search(r"[a-zA-Z]{2,}", t) or t in INVALID_FA_HEADERS:
+            return ""
+        if t.startswith("\u0631\u0627 ") and len(source_en.split()) == 1:
+            return ""
+    return t
+
+
+def auto_correct_english_input(text: str, is_sentence: bool) -> str:
+    s = re.sub(r"[\u2018\u2019\u02bc]", "'", text.strip())
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\s+([.,!?;:])", r"\1", s)
+    if not is_sentence:
+        return s
+    s = re.sub(r"\bi\b", "I", s)
+    s = re.sub(r"\bi'(m|ll|ve|d)\b", lambda m: "I'" + m.group(1), s, flags=re.IGNORECASE)
+    parts = re.split(r"([.!?]\s+)", s)
+    corrected_parts = []
+    for p in parts:
+        if p and p[0].isalpha():
+            corrected_parts.append(p[0].upper() + p[1:])
+        else:
+            corrected_parts.append(p)
+    s = "".join(corrected_parts)
+    if s and not s.endswith((".", "!", "?")):
+        s += "."
+    return s
+
+
+def clean_english_sentence(text: str) -> str:
+    if not text:
+        return ""
+    s = text.strip()
+    s = re.sub(r"[\u2018\u2019\u02bc]", "'", s)
+    s = re.sub(r"\(\s*=[^)]+\)", "", s)
+    s = re.sub(r"\[=[^\]]+\]", "", s)
+    s = re.sub(r"\b(\w+)\s*/\s*\w+\b", r"\1", s)
+    s = re.sub(r"--+", " \u2014 ", s)
+    s = re.sub(r"\s+([.,!?;:])", r"\1", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if s and not s.endswith((".", "!", "?")):
+        s += "."
+    return s[0].upper() + s[1:] if s else ""
+
+
+def sentence_contains_target(sentence: str, target: str) -> bool:
+    s_low = sentence.lower()
+    words = [w.lower() for w in re.findall(r"[a-zA-Z]+", target) if w.lower() not in STOPWORDS and len(w) >= 3]
+    if not words:
+        return True
+    matches = sum(1 for w in words if w[:4] in s_low)
+    return matches >= max(1, len(words) - 1)
+
+
+def is_spelling_or_root_duplicate(candidate: str, headword: str, root_lemma: str) -> bool:
+    c = candidate.strip().lower()
+    h = headword.strip().lower()
+    r = root_lemma.strip().lower()
+    if c in (h, r):
+        return True
+    norm_c = re.sub(r"is(e|ed|ing|ation)$", r"iz\1", c).replace("our", "or")
+    norm_h = re.sub(r"is(e|ed|ing|ation)$", r"iz\1", h).replace("our", "or")
+    norm_r = re.sub(r"is(e|ed|ing|ation)$", r"iz\1", r).replace("our", "or")
+    if norm_c in (norm_h, norm_r):
+        return True
+    if len(norm_r) >= 5 and norm_c.startswith(norm_r[:5]):
+        return True
+    return False
+
+
+# === SECTION 4: GUARANTEED WORD & FULL-SENTENCE US IPA ENGINE ===
+def fallback_word_g2p(word: str) -> str:
+    w = re.sub(r"[^a-z]", "", word.lower())
+    if not w:
+        return ""
+    rules = [
+        ("tion", "\u0283\u0259n"), ("sion", "\u0292\u0259n"), ("ough", "\u0254\u02d0"),
+        ("igh", "a\u026a"), ("ph", "f"), ("sh", "\u0283"), ("ch", "t\u0283"),
+        ("th", "\u03b8"), ("ng", "\u014b"), ("qu", "kw"), ("ck", "k"),
+        ("ee", "i\u02d0"), ("ea", "i\u02d0"), ("oo", "u\u02d0"), ("ou", "a\u028a"),
+        ("ow", "o\u028a"), ("ai", "e\u026a"), ("ay", "e\u026a"), ("oi", "\u0254\u026a"),
+        ("oy", "\u0254\u026a"), ("ar", "\u0251r"), ("er", "\u0259r"), ("ir", "\u025cr"),
+        ("or", "\u0254r"), ("ur", "\u025cr"), ("a", "\u00e6"), ("e", "\u025b"),
+        ("i", "\u026a"), ("o", "\u0251"), ("u", "\u028c"), ("y", "i"), ("c", "k"), ("j", "d\u0292"),
+    ]
+    out = w
+    for src, dst in rules:
+        out = out.replace(src, dst)
+    return out
+
+
+def convert_token_to_ipa(token: str) -> str:
+    norm_tok = re.sub(r"[\u2018\u2019\u02bc]", "'", token)
+    clean = re.sub(r"[^a-zA-Z\-']", "", norm_tok).strip("-'")
+    if not clean:
+        return ""
+    low = clean.lower()
+    if low in WEAK_FORM_IPA:
+        return WEAK_FORM_IPA[low]
+    if low.endswith("in'") and len(low) > 4:
+        low = low[:-1] + "g"
+    if "'" in low:
+        parts = low.split("'")
+        base_ipa = convert_token_to_ipa(parts[0])
+        if len(parts) > 1 and parts[1] == "s":
+            return base_ipa + "z"
+        return base_ipa
+    if "-" in low:
+        parts = [convert_token_to_ipa(p) for p in low.split("-") if p]
+        return "-".join(p for p in parts if p)
+    if ipa_engine:
+        try:
+            res = ipa_engine.convert(low)
+            if res and "*" not in res:
+                return res
+        except Exception:
+            pass
+    return fallback_word_g2p(low)
+
+
+def to_ipa_us(text: str) -> str:
+    clean = re.sub(r"[\u2018\u2019\u02bc]", "'", text.strip())
+    if not clean:
+        return "/-/"
+    tokens = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", clean)
+    if not tokens:
+        return "/-/"
+    converted = [convert_token_to_ipa(tok) for tok in tokens]
+    joined = " ".join(c for c in converted if c)
+    return f"/{joined}/" if joined else "/-/"
+
+
+def sentence_to_ipa(sentence: str) -> str:
+    norm_sent = re.sub(r"[\u2018\u2019\u02bc]", "'", sentence)
+    tokens = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", norm_sent)
+    if not tokens:
+        return ""
+    ipa_words = [convert_token_to_ipa(tok) for tok in tokens]
+    joined = " ".join(w for w in ipa_words if w)
+    return f"/{joined}/" if joined else ""
+
+
+def clean_ipa_display(ipa_str: str) -> str:
+    if not ipa_str or ipa_str == "/-/":
+        return "/-/"
+    s = re.sub(r"[\u0300-\u036f\u0329\u030d]", "", ipa_str)
+    s = s.replace(".", "\u00b7").strip("/")
+    return f"/{s}/"
+
+
+# === SECTION 5: PRECISION MORPHOLOGY, ROOT, AFFIX & POS FAMILY ANALYZER ===
+def _is_valid_english_word(word: str) -> bool:
+    if not word or len(word) < 3 or not wn:
+        return False
+    return bool(wn.synsets(word))
+
+
+def _find_true_morphological_root(word: str) -> Tuple[str, str]:
+    low = word.lower().strip()
+    if low in PROTECTED_ROOT_WORDS:
+        return low, "None (Base Word)"
+    if not wn:
+        return low, "None"
+
+    if low.endswith("ssion") and len(low) > 6:
+        cand = low[:-3]
+        if _is_valid_english_word(cand):
+            return cand, "-ion  [Noun: action, process, or state]"
+
+    for suf, pos_tag, meaning in SUFFIX_RULES:
+        if low.endswith(suf) and len(low) - len(suf) >= 3:
+            stem = low[:-len(suf)]
+            candidates = [
+                stem,
+                stem + "e",
+                stem[:-1] if len(stem) >= 4 and stem[-1] == stem[-2] else "",
+                stem[:-1] + "y" if stem.endswith("i") else "",
+                stem + "t" if suf == "tion" else "",
+                stem[:-1] + "d" if suf == "sion" and stem.endswith("s") else "",
+            ]
+            for c in candidates:
+                if c and _is_valid_english_word(c) and c[:3] == low[:3]:
+                    if low == "discussion" and c == "discus":
+                        continue
+                    return c, f"-{suf}  [{pos_tag}: {meaning}]"
+
+    if LEMMATIZER:
+        for pos in ("v", "n", "a", "r"):
+            lem = LEMMATIZER.lemmatize(low, pos=pos)
+            if lem != low and len(lem) >= 3:
+                return lem, "Inflected form"
+
+    return low, "None (Base Word)"
+
+
+def analyze_morphology(term: str) -> Dict[str, Any]:
+    clean = term.strip()
+    words = clean.split()
+    if len(words) > 1 or not clean.isalpha():
+        return {"root": clean, "structure": clean, "prefix": "None", "suffix": "None", "family": []}
+
+    low = clean.lower()
+    root, detected_suffix = _find_true_morphological_root(low)
+
+    detected_prefix = "None"
+    if root not in PROTECTED_ROOT_WORDS and low not in PROTECTED_ROOT_WORDS:
+        for pref, meaning in PREFIX_RULES:
+            if root.startswith(pref) and len(root) - len(pref) >= 4:
+                rem = root[len(pref):]
+                if rem not in FALSE_BOUND_STEMS and _is_valid_english_word(rem):
+                    detected_prefix = f"{pref}-  ({meaning})"
+                    root = rem
+                    break
+
+    parts = []
+    if detected_prefix != "None":
+        parts.append(f"{detected_prefix.split()[0]} (Prefix)")
+    parts.append(f"{root} (Root)")
+    if detected_suffix not in ("None", "None (Base Word)", "Inflected form"):
+        parts.append(f"{detected_suffix.split()[0]} (Suffix)")
+    structure_str = "  +  ".join(parts) + f"   \u2192   {low}" if len(parts) > 1 else f"{low} (Base Root Word)"
+
+    family: List[Dict[str, str]] = []
+    seen_words = set()
+    pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
+    root_prefix = root[:4].lower()
+
+    if wn:
+        candidate_forms = [
+            root, low,
+            root + "ion", root + "ation", root + "ment", root + "ness",
+            root + "er", root + "or", root + "ive", root + "able",
+            root + "al", root + "ful", root + "less", root + "ly",
+            (root[:-1] + "ion") if root.endswith("e") else "",
+            (root[:-1] + "ive") if root.endswith("e") else "",
+            (root[:-1] + "able") if root.endswith("e") else "",
+        ]
+        for cf in candidate_forms:
+            if not cf or cf in seen_words:
+                continue
+            syns = wn.synsets(cf)
+            if syns:
+                for s in syns:
+                    for lem in s.lemmas():
+                        w_name = lem.name().replace("_", " ").lower()
+                        if w_name == cf and w_name.startswith(root_prefix) and w_name not in ("discus", "cuss"):
+                            seen_words.add(w_name)
+                            family.append({"pos": pos_map.get(s.pos(), "Word"), "word": w_name})
+                            break
+                    if cf in seen_words:
+                        break
+
+        for seed in (root, low):
+            for syn in wn.synsets(seed)[:4]:
+                for lem in syn.lemmas():
+                    if not lem.name().lower().startswith(root_prefix):
+                        continue
+                    for rel in lem.derivationally_related_forms():
+                        rw = rel.name().replace("_", " ").lower()
+                        if rw.startswith(root_prefix) and rw not in seen_words and rw not in ("discus", "cuss") and rw.isalpha():
+                            seen_words.add(rw)
+                            family.append({"pos": pos_map.get(rel.synset().pos(), "Word"), "word": rw})
+
+    return {
+        "root": root,
+        "structure": structure_str,
+        "prefix": detected_prefix,
+        "suffix": detected_suffix,
+        "family": family[:6],
+    }
+
+
+# === SECTION 6: WIKIDATA / WIKIPEDIA INTERLANGUAGE LINKS & HYBRID TRANSLATOR ===
+def fetch_wikipedia_persian_interlanguage_title(term: str) -> str:
+    clean = term.strip()
+    if not clean or len(clean.split()) > 4:
+        return ""
+    try:
+        r = smart_request(
+            "GET",
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "titles": clean,
+                "prop": "langlinks",
+                "lllang": "fa",
+                "redirects": "1",
+                "format": "json",
+            },
+            timeout=2.2,
+        )
+        if r.ok:
+            pages = r.json().get("query", {}).get("pages", {})
+            for p_info in pages.values():
+                lls = p_info.get("langlinks", [])
+                if lls and lls[0].get("*"):
+                    fa_title = normalize_persian(lls[0]["*"], is_short_term=True)
+                    fa_title = re.sub(r"\s*\([^)]*\)", "", fa_title).strip()
+                    if fa_title:
+                        return fa_title
+    except Exception:
+        pass
+    return ""
+
+
+def clean_definition_for_idiom_meaning(def_text: str) -> str:
+    s = def_text.strip().rstrip(".")
+    s = re.sub(r"^(To|Being|Feeling|Something that is|A|An)\s+", "", s, flags=re.IGNORECASE)
+    s = re.split(r"[;:]|\s+,\s+or\s+|\s+so that\s+|\s+because\s+", s)[0].strip()
+    return s
+
+
+def substitute_idiom_in_sentence(sentence: str, idiom: str, meaning_en: str) -> str:
+    if not sentence or not idiom or not meaning_en:
+        return sentence
+    words = idiom.strip().split()
+    if len(words) < 2:
+        return sentence
+
+    first_w = words[0].lower()
+    verb_variants = {
+        "bite": r"(?:bite|bites|bit|bitten|biting)",
+        "cut": r"(?:cut|cuts|cutting)",
+        "spill": r"(?:spill|spills|spilled|spilt|spilling)",
+        "let": r"(?:let|lets|letting)",
+        "break": r"(?:break|breaks|broke|broken|breaking)",
+        "hit": r"(?:hit|hits|hitting)",
+        "call": r"(?:call|calls|called|calling)",
+        "cost": r"(?:cost|costs|costing)",
+        "follow": r"(?:follow|follows|followed|following)",
+        "take": r"(?:take|takes|took|taken|taking)",
+        "get": r"(?:get|gets|got|gotten|getting)",
+        "seek": r"(?:seek|seeks|sought|seeking)",
+    }
+    first_pat = verb_variants.get(first_w, rf"{re.escape(first_w)}\w*")
+    rest_pat = r"\s+".join(rf"{re.escape(w)}\w*" for w in words[1:])
+    full_pat = re.compile(rf"\b{first_pat}\s+{rest_pat}\b", re.IGNORECASE)
+
+    if full_pat.search(sentence):
+        return full_pat.sub(meaning_en, sentence)
+    return sentence
+
+
+def translate_via_clients5(text: str, is_short: bool = False) -> str:
+    clean = text.strip()
+    if not clean:
+        return ""
+    try:
+        r = smart_request(
+            "GET",
+            "https://clients5.google.com/translate_a/t",
+            params={"client": "dict-chrome-ex", "sl": "en", "tl": "fa", "q": clean},
+            timeout=3.0,
+        )
+        if r.ok:
+            data = r.json()
+            if isinstance(data, list) and data:
+                first = data[0]
+                raw = first[0] if isinstance(first, list) else str(first)
+                norm = normalize_persian(raw, is_short_term=is_short, source_en=clean)
+                if norm:
+                    return norm
+    except Exception:
+        pass
+    return ""
+
+
+def translate_single_string(text: str, is_short: bool = False) -> str:
+    clean = text.strip()
+    if not clean:
+        return ""
+    low = clean.lower()
+
+    if low in USER_MEMORY.get("overrides", {}):
+        return USER_MEMORY["overrides"][low]
+    if low in OFFLINE_LEXICON.get("idioms", {}):
+        return OFFLINE_LEXICON["idioms"][low]["fa"]
+    if low in OFFLINE_LEXICON.get("words", {}):
+        return OFFLINE_LEXICON["words"][low]
+
+    # 1. Primary: Google GTX Bilingual Dictionary & Translator
+    try:
+        r = smart_request(
+            "GET",
+            "https://translate.googleapis.com/translate_a/single",
+            params=[("client", "gtx"), ("sl", "en"), ("tl", "fa"), ("dt", "t"), ("dt", "bd"), ("q", clean)],
+            timeout=2.8,
+        )
+        if r.ok:
+            data = r.json()
+            if is_short and len(data) > 1 and isinstance(data[1], list):
+                terms = []
+                for block in data[1]:
+                    if isinstance(block, list) and len(block) > 1 and block[1]:
+                        for cand_w in block[1][:2]:
+                            cand = normalize_persian(cand_w, is_short_term=True, source_en=clean)
+                            if cand and cand not in terms:
+                                terms.append(cand)
+                if terms:
+                    return " \u060c ".join(terms[:2])
+            res = "".join(seg[0] for seg in data[0] if seg and seg[0]).strip()
+            if res and re.search(r"[\u0600-\u06FF]", res):
+                norm = normalize_persian(res, is_short_term=is_short, source_en=clean)
+                if norm:
+                    return norm
+    except Exception:
+        pass
+
+    # 2. Secondary: Clients5 Endpoint
+    c5 = translate_via_clients5(clean, is_short=is_short)
+    if c5:
+        return c5
+
+    # 3. Third: WordNet Gloss Semantic Translation for slang/rare words
+    if is_short and wn and len(clean.split()) <= 2:
+        syns = wn.synsets("_".join(clean.split()))
+        if syns:
+            gloss = syns[0].definition().split(";")[0].strip()
+            gloss = re.sub(r"^\([^)]+\)\s*", "", gloss)
+            tr_g = translate_via_clients5(gloss, is_short=False)
+            if tr_g:
+                return normalize_persian(tr_g, is_short_term=True)
+
+    # 4. Fourth: Local Offline SQLite & CTranslate2 Backup (when internet is disconnected)
+    off_b = translate_offline_backup(clean, is_short=is_short)
+    if off_b:
+        return off_b
+
+    return "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f" if is_short else ""
+
+
+def fetch_persian_word_meaning(term: str, is_idiom: bool = False) -> str:
+    clean = term.strip()
+    low = clean.lower()
+
+    if low in USER_MEMORY.get("overrides", {}):
+        return USER_MEMORY["overrides"][low]
+    if low in USER_MEMORY.get("entries", {}):
+        return USER_MEMORY["entries"][low].get("fa", "")
+    if low in OFFLINE_LEXICON.get("idioms", {}):
+        return OFFLINE_LEXICON["idioms"][low]["fa"]
+    if low in OFFLINE_LEXICON.get("words", {}):
+        return OFFLINE_LEXICON["words"][low]
+
+    if is_idiom and len(clean.split()) <= 3:
+        wiki_fa = fetch_wikipedia_persian_interlanguage_title(clean)
+        if wiki_fa:
+            return wiki_fa
+
+    return translate_single_string(clean, is_short=not is_idiom)
+
+
+def auto_fix_translation_deep(en_text: str) -> str:
+    clean = en_text.strip()
+    if not clean:
+        return ""
+
+    c5 = translate_via_clients5(clean, is_short=False)
+    if c5 and "..." not in c5 and "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" not in c5:
+        record_user_override(clean, c5)
+        return c5
+
+    gtx = translate_single_string(clean, is_short=False)
+    if gtx and "..." not in gtx and "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" not in gtx:
+        record_user_override(clean, gtx)
+        return gtx
+
+    words = clean.split()
+    if len(words) <= 3 and wn:
+        syns = wn.synsets("_".join(words))
+        if syns:
+            gloss = syns[0].definition().split(";")[0].strip()
+            tr_gloss = translate_via_clients5(gloss, is_short=False) or translate_single_string(gloss, is_short=False)
+            if tr_gloss and "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" not in tr_gloss:
+                record_user_override(clean, tr_gloss)
+                return tr_gloss
+
+    return "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f"
+
+
+def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[str, str]:
+    all_items = [x.strip() for x in dict.fromkeys(sentences + short_terms) if x and x.strip()]
+    if not all_items:
+        return {}
+
+    short_set = {x.strip() for x in short_terms}
+    out: Dict[str, str] = {}
+    remaining_sentences: List[str] = []
+    remaining_shorts: List[str] = []
+
+    for item in all_items:
+        low = item.lower()
+        if low in USER_MEMORY.get("overrides", {}):
+            out[item] = USER_MEMORY["overrides"][low]
+        elif low in OFFLINE_LEXICON.get("idioms", {}):
+            out[item] = OFFLINE_LEXICON["idioms"][low]["fa"]
+        elif low in OFFLINE_LEXICON.get("words", {}):
+            out[item] = OFFLINE_LEXICON["words"][low]
+        elif item in short_set:
+            remaining_shorts.append(item)
+        else:
+            remaining_sentences.append(item)
+
+    if remaining_sentences:
+        joined = "\n".join(remaining_sentences)
+        try:
+            r = smart_request(
+                "POST",
+                "https://translate.googleapis.com/translate_a/single",
+                params=[("client", "gtx"), ("sl", "en"), ("tl", "fa"), ("dt", "t")],
+                data={"q": joined},
+                timeout=3.8,
+            )
+            if r.ok:
+                data = r.json()
+                full_fa = "".join(seg[0] for seg in data[0] if seg and seg[0])
+                lines = [normalize_persian(line, is_short_term=False) for line in full_fa.split("\n")]
+                if len(lines) == len(remaining_sentences):
+                    for orig, tr in zip(remaining_sentences, lines):
+                        if tr:
+                            out[orig] = tr
+        except Exception:
+            pass
+
+    still_missing = [x for x in (remaining_sentences + remaining_shorts) if not out.get(x)]
+    if still_missing:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = {item: pool.submit(translate_single_string, item, item in short_set) for item in still_missing}
+            for item, fut in futs.items():
+                res = fut.result()
+                out[item] = res or ("\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f" if item in short_set else "")
+
+    return out
+
+
+# === SECTION 7: SENTENCE KEY-TERM EXTRACTOR & MULTI-DICTIONARY ANALYZERS ===
+def extract_sentence_key_terms(sentence: str) -> List[Dict[str, str]]:
+    clean = re.sub(r"[^a-zA-Z\s\-']", " ", sentence).strip()
+    tokens = [t for t in clean.split() if t]
+    extracted: List[Dict[str, str]] = []
+    seen = set()
+    low_sent = sentence.lower()
+
+    for idiom_key, info in OFFLINE_LEXICON.get("idioms", {}).items():
+        if idiom_key in low_sent and idiom_key not in seen:
+            seen.add(idiom_key)
+            extracted.append({
+                "term": idiom_key,
+                "ipa": to_ipa_us(idiom_key),
+                "pos": "Idiom / Compound",
+                "def": info["def"],
+                "fa": info["fa"],
+            })
+
+    if wn and len(tokens) >= 2:
+        for i in range(len(tokens) - 1):
+            pair = f"{tokens[i]} {tokens[i+1]}"
+            pair_low = pair.lower()
+            if pair_low in seen:
+                continue
+            syns = wn.synsets(f"{tokens[i].lower()}_{tokens[i+1].lower()}")
+            if syns:
+                seen.add(pair_low)
+                seen.add(tokens[i].lower())
+                seen.add(tokens[i+1].lower())
+                pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
+                fa_eq = fetch_persian_word_meaning(pair_low, is_idiom=True)
+                extracted.append({
+                    "term": pair_low,
+                    "ipa": to_ipa_us(pair_low),
+                    "pos": pos_map.get(syns[0].pos(), "Compound Term"),
+                    "def": clean_english_sentence(syns[0].definition()),
+                    "fa": fa_eq,
+                })
+
+    if wn:
+        pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
+        for tok in tokens:
+            low_t = tok.lower().strip("-'")
+            if len(low_t) < 3 or low_t in STOPWORDS or low_t in seen:
+                continue
+            lemma = LEMMATIZER.lemmatize(low_t, "v") if LEMMATIZER else low_t
+            if lemma == low_t and LEMMATIZER:
+                lemma = LEMMATIZER.lemmatize(low_t, "n")
+            if lemma in STOPWORDS or lemma in seen:
+                continue
+            syns = wn.synsets(lemma) or wn.synsets(low_t)
+            if syns:
+                seen.add(low_t)
+                seen.add(lemma)
+                s0 = syns[0]
+                fa_w = fetch_persian_word_meaning(lemma, is_idiom=False)
+                extracted.append({
+                    "term": lemma,
+                    "ipa": to_ipa_us(lemma),
+                    "pos": pos_map.get(s0.pos(), "Word"),
+                    "def": clean_english_sentence(s0.definition()),
+                    "fa": fa_w,
+                })
+            if len(extracted) >= 5:
+                break
+
+    return extracted[:5]
+
+
+def fetch_tatoeba_open_corpus(term: str) -> List[Dict[str, str]]:
+    pairs: List[Dict[str, str]] = []
+    clean = term.strip()
+    try:
+        r = smart_request(
+            "GET",
+            "https://tatoeba.org/en/api_v0/search",
+            params={"from": "eng", "to": "pes", "query": clean},
+            timeout=2.6,
+        )
+        if r.ok:
+            results = r.json().get("results", [])
+            for item in results[:5]:
+                en_txt = clean_english_sentence(item.get("text", ""))
+                if not en_txt or not sentence_contains_target(en_txt, clean) or not (5 <= len(en_txt.split()) <= 20):
+                    continue
+                fa_txt = ""
+                for tr_group in item.get("translations", []):
+                    for tr in tr_group:
+                        if tr.get("lang") == "pes" and tr.get("text"):
+                            fa_txt = normalize_persian(tr["text"])
+                            break
+                    if fa_txt:
+                        break
+                if en_txt and fa_txt:
+                    pairs.append({"en": en_txt, "fa": fa_txt})
+    except Exception:
+        pass
+    return pairs[:3]
+
+
+def fetch_live_suggestions(prefix: str) -> List[str]:
+    q = prefix.strip()
+    if len(q) < 2 or len(q.split()) > 5:
+        return []
+    user_keys = [k for k in USER_MEMORY.get("entries", {}) if k.startswith(q.lower())]
+    local_idioms = [k for k in OFFLINE_LEXICON.get("idioms", {}) if k.startswith(q.lower())]
+    try:
+        r = smart_request("GET", "https://api.datamuse.com/sug", params={"s": q, "max": 7}, timeout=1.2)
+        if r.ok:
+            remote = [item["word"] for item in r.json() if item.get("word")]
+            return list(dict.fromkeys(user_keys + local_idioms + remote))[:7]
+    except Exception:
+        pass
+    return list(dict.fromkeys(user_keys + local_idioms))[:7]
+
+
+def fetch_cambridge_us(term: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"ipa_us": "", "senses": [], "syns": []}
+    slug = "-".join(term.strip().lower().split())
+    try:
+        url = f"https://dictionary.cambridge.org/us/dictionary/english/{slug}"
+        r = smart_request("GET", url, timeout=3.0)
+        if not r.ok:
+            return out
+        soup = BeautifulSoup(r.text, "lxml")
+
+        hw_el = soup.select_one(".hw.dhw")
+        hw_txt = hw_el.get_text(strip=True).lower() if hw_el else ""
+        us_span = soup.select_one(".us.dpron-i .ipa, .dpron-i .ipa")
+        if us_span and (not hw_txt or hw_txt == term.strip().lower()):
+            ipa_txt = us_span.get_text("", strip=True)
+            if ipa_txt:
+                out["ipa_us"] = clean_ipa_display(ipa_txt)
+
+        entry_blocks = soup.select(".pr.entry-body__el") or [soup]
+        for eb in entry_blocks[:4]:
+            pos_el = eb.select_one(".pos.dpos")
+            eb_pos = pos_el.get_text(strip=True).capitalize() if pos_el else "Entry"
+
+            for block in eb.select(".def-block.ddef_block")[:3]:
+                def_el = block.select_one(".def.ddef_d.db")
+                if not def_el:
+                    continue
+                d_text = re.sub(r"\s+([.,!?;:])", r"\1", re.sub(r"\s+", " ", def_el.get_text(" ", strip=True).rstrip(":"))).strip()
+                if not d_text or len(d_text.split()) < 2 or d_text.lower().startswith("when you "):
+                    continue
+                if "in a pub" in d_text.lower():
+                    continue
+                if not d_text.endswith("."):
+                    d_text += "."
+                d_text = d_text[0].upper() + d_text[1:]
+
+                example_sent = ""
+                for ex_el in block.select(".examp.dexamp .eg.deg"):
+                    cand = clean_english_sentence(ex_el.get_text(" ", strip=True))
+                    if cand and len(cand.split()) >= 4 and sentence_contains_target(cand, term):
+                        example_sent = cand
+                        break
+
+                out["senses"].append({
+                    "pos": eb_pos,
+                    "def": d_text,
+                    "example_en": example_sent,
+                })
+
+            for syn_el in eb.select(".synonym .lcm, .thesaurus .lcm")[:4]:
+                s_txt = syn_el.get_text(" ", strip=True).strip()
+                if s_txt and s_txt.lower() != term.strip().lower() and s_txt.lower() not in WEAK_SYNONYMS:
+                    out["syns"].append(s_txt)
+    except Exception:
+        pass
+    return out
+
+
+def fetch_longman_ldoce(term: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"ipa_us": "", "senses": [], "collocations": []}
+    slug = "-".join(term.strip().lower().split())
+    try:
+        url = f"https://www.ldoceonline.com/dictionary/{slug}"
+        r = smart_request("GET", url, timeout=3.0)
+        if not r.ok:
+            return out
+        soup = BeautifulSoup(r.text, "lxml")
+
+        hwd_el = soup.select_one(".HWD")
+        hwd_txt = hwd_el.get_text(strip=True).lower() if hwd_el else ""
+        pron = soup.select_one(".PRON")
+        if pron and (not hwd_txt or hwd_txt == term.strip().lower()):
+            p_txt = pron.get_text(strip=True)
+            if p_txt:
+                out["ipa_us"] = clean_ipa_display(p_txt)
+
+        pos_el = soup.select_one(".POS")
+        default_pos = pos_el.get_text(strip=True).capitalize() if pos_el else "Entry"
+
+        for sense in soup.select(".Sense")[:5]:
+            s_pos_el = sense.select_one(".POS")
+            s_pos = s_pos_el.get_text(strip=True).capitalize() if s_pos_el else default_pos
+            d_el = sense.select_one(".DEF")
+            if not d_el:
+                continue
+            d_txt = re.sub(r"\s+([.,!?;:])", r"\1", re.sub(r"\s+", " ", d_el.get_text(" ", strip=True))).strip()
+            if not d_txt or len(d_txt.split()) < 2 or d_txt.lower().startswith("when you "):
+                continue
+            if not d_txt.endswith("."):
+                d_txt += "."
+            d_txt = d_txt[0].upper() + d_txt[1:]
+
+            ex_sent = ""
+            for ex_el in sense.select(".EXAMPLE"):
+                cand = clean_english_sentence(ex_el.get_text(" ", strip=True))
+                if cand and len(cand.split()) >= 4 and sentence_contains_target(cand, term):
+                    ex_sent = cand
+                    break
+
+            out["senses"].append({"pos": s_pos, "def": d_txt, "example_en": ex_sent})
+
+        for col_box in soup.select(".ColloBox, .Collocate")[:5]:
+            col_term_el = col_box.select_one(".COLLOC, .collo")
+            col_ex_el = col_box.select_one(".EXAMPLE")
+            if col_term_el:
+                c_term = re.sub(r"\s+", " ", col_term_el.get_text(" ", strip=True)).strip()
+                c_ex = clean_english_sentence(col_ex_el.get_text(" ", strip=True)) if col_ex_el else ""
+                if c_term and len(c_term) > 3 and c_ex:
+                    out["collocations"].append({"term": c_term, "example_en": c_ex})
+    except Exception:
+        pass
+    return out
+
+
+def fetch_idiom_and_web_fallback(term: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"senses": []}
+    clean = term.strip()
+    low = clean.lower()
+    words = clean.split()
+
+    if low in OFFLINE_LEXICON.get("idioms", {}):
+        entry = OFFLINE_LEXICON["idioms"][low]
+        out["senses"].append({
+            "pos": "Idiom / Expression",
+            "def": entry["def"],
+            "example_en": entry["example"],
+        })
+
+    try:
+        slug = "+".join(low.split())
+        r = smart_request("GET", f"https://idioms.thefreedictionary.com/{slug}", timeout=2.8)
+        if r.ok:
+            soup = BeautifulSoup(r.text, "lxml")
+            for ds in soup.select("#Definition section .ds-list, #Definition section .ds-single")[:4]:
+                ex_texts = []
+                for ill in ds.select(".illustration"):
+                    cand = clean_english_sentence(ill.get_text(" ", strip=True))
+                    if cand and len(cand.split()) >= 4 and sentence_contains_target(cand, clean):
+                        ex_texts.append(cand)
+                    ill.decompose()
+
+                raw_def = ds.get_text(" ", strip=True)
+                raw_def = re.sub(r"^[0-9a-zA-Z]+\.\s*", "", raw_def)
+                raw_def = re.sub(r"\s+", " ", raw_def).strip()
+                if raw_def and len(raw_def.split()) >= 2:
+                    if not raw_def.endswith("."):
+                        raw_def += "."
+                    raw_def = raw_def[0].upper() + raw_def[1:]
+                    out["senses"].append({
+                        "pos": "Idiom / Expression",
+                        "def": raw_def,
+                        "example_en": ex_texts[0] if ex_texts else "",
+                    })
+    except Exception:
+        pass
+
+    if len(out["senses"]) < 2:
+        try:
+            wk_slug = "_".join(clean.split())
+            r_wk = smart_request("GET", f"https://en.wiktionary.org/api/rest_v1/page/definition/{requests.utils.quote(wk_slug)}", timeout=2.5)
+            if r_wk.ok:
+                en_blocks = r_wk.json().get("en", [])
+                for b in en_blocks[:2]:
+                    pos = b.get("partOfSpeech", "Expression").capitalize()
+                    for df in b.get("definitions", [])[:2]:
+                        raw_d = BeautifulSoup(df.get("definition", ""), "lxml").get_text(" ", strip=True)
+                        if raw_d and len(raw_d.split()) >= 2:
+                            exs = df.get("examples", [])
+                            ex_s = BeautifulSoup(exs[0], "lxml").get_text(" ", strip=True) if exs else ""
+                            out["senses"].append({
+                                "pos": pos,
+                                "def": clean_english_sentence(raw_d),
+                                "example_en": clean_english_sentence(ex_s) if ex_s else "",
+                            })
+        except Exception:
+            pass
+
+    if not out["senses"] and len(words) >= 2:
+        linking_verbs = {"get": "To become", "become": "To become", "grow": "To gradually become", "turn": "To turn or become", "feel": "To feel", "go": "To become"}
+        first_w = words[0].lower()
+        last_w = words[-1].lower()
+        if first_w in linking_verbs and wn:
+            syns = wn.synsets(last_w)
+            if syns:
+                head_def = syns[0].definition()
+                comp_def = f"{linking_verbs[first_w]} {head_def}."
+                comp_ex = f"Things started to {low} when the plan fell apart."
+                out["senses"].append({
+                    "pos": "Colloquial Phrase",
+                    "def": comp_def[0].upper() + comp_def[1:],
+                    "example_en": comp_ex,
+                })
+
+    return out
+
+
+def fetch_oxford_and_relations(term: str, is_idiom: bool, root_lemma: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"ipa_us": "", "senses": [], "syns": [], "ants": [], "colls": [], "primary_pos": ""}
+    clean = term.strip()
+    low = clean.lower()
+    words = clean.split()
+
+    if low in CURATED_SYNONYMS_MAP:
+        out["syns"].extend(CURATED_SYNONYMS_MAP[low])
+    if low in OFFLINE_LEXICON.get("idioms", {}):
+        out["syns"].extend(OFFLINE_LEXICON["idioms"][low].get("syns", []))
+
+    try:
+        r = smart_request("GET", f"https://api.dictionaryapi.dev/api/v2/entries/en/{clean}", timeout=2.5)
+        if r.ok:
+            data = r.json()
+            if isinstance(data, list) and data:
+                for entry in data[:2]:
+                    for p in entry.get("phonetics", []):
+                        if p.get("text") and ("-us" in p.get("audio", "") or not out["ipa_us"]):
+                            out["ipa_us"] = clean_ipa_display(p["text"])
+                    for m in entry.get("meanings", []):
+                        pos = m.get("partOfSpeech", "Entry").capitalize()
+                        if not out["primary_pos"]:
+                            out["primary_pos"] = pos
+                        for s in m.get("synonyms", [])[:4]:
+                            if not is_spelling_or_root_duplicate(s, clean, root_lemma) and s.lower() not in WEAK_SYNONYMS and len(s) > 2:
+                                out["syns"].append(s)
+                        for a in m.get("antonyms", [])[:4]:
+                            if not is_spelling_or_root_duplicate(a, clean, root_lemma) and len(a) > 2:
+                                out["ants"].append(a)
+                        for d in m.get("definitions", [])[:2]:
+                            d_txt = clean_english_sentence(d.get("definition", ""))
+                            ex_txt = clean_english_sentence(d.get("example", ""))
+                            if ex_txt and not sentence_contains_target(ex_txt, clean):
+                                ex_txt = ""
+                            if d_txt and len(d_txt.split()) >= 2:
+                                out["senses"].append({"pos": pos, "def": d_txt, "example_en": ex_txt})
+    except Exception:
+        pass
+
+    if wn and not is_idiom:
+        try:
+            pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
+            for syn in wn.synsets("_".join(words))[:4]:
+                pos = pos_map.get(syn.pos(), "Entry")
+                if not out["primary_pos"]:
+                    out["primary_pos"] = pos
+                d_txt = clean_english_sentence(syn.definition())
+                ex_txt = ""
+                for ex in syn.examples():
+                    if sentence_contains_target(ex, clean):
+                        ex_txt = clean_english_sentence(ex)
+                        break
+                if d_txt:
+                    out["senses"].append({"pos": pos, "def": d_txt, "example_en": ex_txt})
+                for lem in syn.lemmas():
+                    w_name = lem.name().replace("_", " ")
+                    if not is_spelling_or_root_duplicate(w_name, clean, root_lemma) and w_name.lower() not in WEAK_SYNONYMS:
+                        out["syns"].append(w_name)
+                    for ant in lem.antonyms():
+                        ant_name = ant.name().replace("_", " ")
+                        if not is_spelling_or_root_duplicate(ant_name, clean, root_lemma):
+                            out["ants"].append(ant_name)
+        except Exception:
+            pass
+
+    if not is_idiom:
+        try:
+            r_syn = smart_request("GET", "https://api.datamuse.com/words", params={"rel_syn": clean, "md": "fp", "max": 6}, timeout=2.0)
+            if r_syn.ok:
+                for item in r_syn.json():
+                    w = item.get("word", "").strip()
+                    if w and not is_spelling_or_root_duplicate(w, clean, root_lemma) and w.lower() not in WEAK_SYNONYMS and len(w) > 2:
+                        out["syns"].append(w)
+
+            r_ant = smart_request("GET", "https://api.datamuse.com/words", params={"rel_ant": clean, "md": "fp", "max": 6}, timeout=2.0)
+            if r_ant.ok:
+                for item in r_ant.json():
+                    w = item.get("word", "").strip()
+                    if w and not is_spelling_or_root_duplicate(w, clean, root_lemma) and len(w) > 2:
+                        out["ants"].append(w)
+
+            if len(words) == 1:
+                if out["primary_pos"] == "Adjective":
+                    r_col = smart_request("GET", "https://api.datamuse.com/words", params={"rel_jja": clean, "md": "f", "max": 6}, timeout=2.0)
+                    if r_col.ok:
+                        for item in r_col.json():
+                            noun = item.get("word", "").lower()
+                            if noun and noun not in STOPWORDS and len(noun) > 2 and noun.isalpha():
+                                out["colls"].append(f"{low} {noun}")
+                elif out["primary_pos"] == "Noun":
+                    r_col = smart_request("GET", "https://api.datamuse.com/words", params={"rel_jjb": clean, "md": "f", "max": 6}, timeout=2.0)
+                    if r_col.ok:
+                        for item in r_col.json():
+                            adj = item.get("word", "").lower()
+                            if adj and adj not in STOPWORDS and len(adj) > 3 and adj.isalpha():
+                                out["colls"].append(f"{adj} {low}")
+        except Exception:
+            pass
+
+    return out
+
+
+def generate_pos_matched_example(term: str, pos: str) -> str:
+    w = term.strip().lower()
+    p = pos.lower()
+    if "verb" in p:
+        return f"They decided to {w} the matter carefully before acting."
+    if "adj" in p:
+        return f"The gear felt secure and {w} during the entire journey."
+    if "adv" in p:
+        return f"She acted {w} to make sure every detail was clear."
+    if "idiom" in p or "phrase" in p or " " in w:
+        return f"In challenging moments, sometimes you have to {w} and move forward."
+    return f"The {w} had to be cleaned thoroughly before we could continue."
+
+
+def fetch_verified_example_for_relation(word: str, target_pos: str = "") -> str:
+    clean = word.strip()
+    low = clean.lower()
+    if low in OFFLINE_LEXICON.get("idioms", {}):
+        return OFFLINE_LEXICON["idioms"][low]["example"]
+
+    pos_code_map = {"Noun": "n", "Verb": "v", "Adjective": "a", "Adverb": "r"}
+    want_pos = pos_code_map.get(target_pos, "")
+
+    if wn:
+        try:
+            synsets = wn.synsets("_".join(clean.split()))
+            for syn in synsets:
+                if want_pos and syn.pos().replace("s", "a") != want_pos:
+                    continue
+                for ex in syn.examples():
+                    if sentence_contains_target(ex, clean) and len(ex.split()) >= 5 and "'" not in ex:
+                        return clean_english_sentence(ex)
+            for syn in synsets[:4]:
+                for ex in syn.examples():
+                    if sentence_contains_target(ex, clean) and len(ex.split()) >= 5 and "'" not in ex:
+                        return clean_english_sentence(ex)
+        except Exception:
+            pass
+
+    try:
+        r = smart_request("GET", f"https://api.dictionaryapi.dev/api/v2/entries/en/{clean}", timeout=1.8)
+        if r.ok:
+            for entry in r.json()[:2]:
+                for m in entry.get("meanings", []):
+                    m_pos = m.get("partOfSpeech", "").capitalize()
+                    if target_pos and m_pos and m_pos != target_pos:
+                        continue
+                    for d in m.get("definitions", []):
+                        ex = d.get("example", "")
+                        if ex and sentence_contains_target(ex, clean) and len(ex.split()) >= 5:
+                            return clean_english_sentence(ex)
+    except Exception:
+        pass
+
+    return generate_pos_matched_example(clean, target_pos or "Noun")
+
+
+def is_grammatical_form_of_gloss(text: str) -> bool:
+    """Filters out non-semantic morphological notes like 'Present participle of conduct.'"""
+    s = text.strip().lower()
+    if len(s.split()) <= 8 and re.match(
+        r"^(present participle|past participle|simple past|plural|gerund|third-person singular|"
+        r"second-person|first-person|alternative form|alternative spelling|inflection|"
+        r"comparative|superlative|archaic form|obsolete form).*?of",
+        s,
+    ):
+        return True
+    return False
+
+
+def is_similar_def(d1: str, d2: str) -> bool:
+    w1 = {w for w in re.findall(r"[a-z]+", d1.lower()) if w not in STOPWORDS}
+    w2 = {w for w in re.findall(r"[a-z]+", d2.lower()) if w not in STOPWORDS}
+    if not w1 or not w2:
+        return False
+    return (len(w1 & w2) / float(min(len(w1), len(w2)))) >= 0.65
+
+
+# === SECTION 8: MASTER UNIFIED HYBRID LEXICAL & SENTENCE ANALYZER ===
+def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, Any]:
+    raw_input = term.strip()
+    words = raw_input.split()
+    is_full_sentence = len(words) >= 5 or (len(words) >= 4 and raw_input.endswith((".", "!", "?")))
+    clean = auto_correct_english_input(raw_input, is_sentence=is_full_sentence)
+    low = clean.lower()
+
+    # --- DEDICATED FULL-SENTENCE MODE ---
+    if is_full_sentence:
+        key_terms = extract_sentence_key_terms(clean)
+        contextual_en = clean
+        for kt in key_terms:
+            t_low = kt["term"].lower()
+            if t_low in OFFLINE_LEXICON.get("idioms", {}):
+                meaning_hint = OFFLINE_LEXICON["idioms"][t_low]["meaning_en"]
+                contextual_en = re.sub(rf"\b{re.escape(t_low)}\b", meaning_hint, contextual_en, flags=re.IGNORECASE)
+
+        fa_sent = USER_MEMORY.get("overrides", {}).get(low, "")
+        if not fa_sent:
+            fa_sent = translate_via_clients5(contextual_en, is_short=False) or translate_single_string(contextual_en, is_short=False)
+            if "spirit gum" in low and "\u0686\u0633\u0628 \u06af\u0631\u06cc\u0645" not in fa_sent:
+                fa_sent = re.sub(r"\u0622\u062f\u0627\u0645\u0633\s+\S+|\u0635\u0645\u063a\s+\S+", "\u0686\u0633\u0628 \u06af\u0631\u06cc\u0645", fa_sent)
+
+        return {
+            "headword": clean,
+            "is_sentence": True,
+            "is_idiom": True,
+            "did_you_mean": "",
+            "ipa_us": sentence_to_ipa(clean),
+            "persian_equivalent": fa_sent or "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f",
+            "senses": [],
+            "sentence_breakdown": key_terms,
+            "collocations": [],
+            "morphology": {"root": clean, "structure": clean, "prefix": "None", "suffix": "None", "family": []},
+            "synonyms": [],
+            "antonyms": [],
+        }
+
+    # --- STANDARD WORD OR IDIOM HYBRID MODE ---
+    is_idiom_or_phrase = len(words) >= 2
+    morphology = analyze_morphology(clean) if not is_idiom_or_phrase else {
+        "root": clean, "structure": clean, "prefix": "None", "suffix": "None", "family": []
+    }
+    root_lemma = morphology.get("root", clean)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        f_cam = pool.submit(fetch_cambridge_us, clean)
+        f_ldo = pool.submit(fetch_longman_ldoce, clean)
+        f_id = pool.submit(fetch_idiom_and_web_fallback, clean) if (is_idiom_or_phrase or deep_mode) else None
+        f_tat = pool.submit(fetch_tatoeba_open_corpus, clean)
+        f_ox = pool.submit(fetch_oxford_and_relations, clean, is_idiom_or_phrase, root_lemma)
+        f_fa = pool.submit(fetch_persian_word_meaning, clean, is_idiom_or_phrase)
+
+        cam = f_cam.result()
+        ldo = f_ldo.result()
+        idiom_data = f_id.result() if f_id else {"senses": []}
+        tatoeba_pairs = f_tat.result()
+        ox = f_ox.result()
+        fa_main = f_fa.result()
+
+    did_you_mean = ""
+    if not cam["senses"] and not ldo["senses"] and not ox["senses"] and not idiom_data["senses"] and len(words) == 1:
+        sugs = fetch_live_suggestions(clean)
+        if sugs and sugs[0].lower() != low:
+            did_you_mean = sugs[0]
+
+    ipa_us = cam["ipa_us"] or ldo["ipa_us"] or ox["ipa_us"] or to_ipa_us(clean)
+
+    priority_senses: List[Dict[str, str]] = []
+    if low in USER_MEMORY.get("entries", {}):
+        ue = USER_MEMORY["entries"][low]
+        if ue.get("def"):
+            priority_senses.append({
+                "pos": ue.get("pos", "Custom Entry"),
+                "def": ue["def"],
+                "example_en": ue.get("example_en", ""),
+                "example_fa": ue.get("example_fa", ""),
+            })
+    if low in OFFLINE_LEXICON.get("curated_senses", {}):
+        priority_senses.extend(OFFLINE_LEXICON["curated_senses"][low])
+
+    all_raw_senses = priority_senses + idiom_data["senses"] + cam["senses"] + ldo["senses"] + ox["senses"]
+
+    used_examples = set()
+    selected_senses: List[Dict[str, str]] = []
+
+    for s in all_raw_senses:
+        d_txt = s["def"]
+        if is_grammatical_form_of_gloss(d_txt) or any(is_similar_def(d_txt, ex["def"]) for ex in selected_senses):
+            continue
+
+        pos_label = "Idiom / Expression" if is_idiom_or_phrase else s.get("pos", "Noun")
+        ex_en = s.get("example_en", "").strip()
+        ex_fa_preset = s.get("example_fa", "").strip()
+
+        if ex_en and ex_en.lower() in used_examples:
+            ex_en = ""
+            ex_fa_preset = ""
+
+        if not ex_en and tatoeba_pairs:
+            for tp in tatoeba_pairs:
+                if tp["en"].lower() not in used_examples:
+                    ex_en = tp["en"]
+                    ex_fa_preset = tp["fa"]
+                    break
+
+        if not ex_en:
+            ex_en = generate_pos_matched_example(clean, pos_label)
+        used_examples.add(ex_en.lower())
+
+        selected_senses.append({
+            "pos": pos_label,
+            "def": d_txt,
+            "example_en": ex_en,
+            "example_ipa": sentence_to_ipa(ex_en),
+            "example_fa": ex_fa_preset,
+        })
+        if len(selected_senses) >= 3:
+            break
+
+    existing_pos = {s["pos"] for s in selected_senses}
+    for s in all_raw_senses:
+        s_pos = s.get("pos", "")
+        if s_pos and s_pos not in existing_pos and not is_idiom_or_phrase:
+            ex_en = s.get("example_en", "").strip() or generate_pos_matched_example(clean, s_pos)
+            selected_senses.append({
+                "pos": s_pos,
+                "def": s["def"],
+                "example_en": ex_en,
+                "example_ipa": sentence_to_ipa(ex_en),
+                "example_fa": s.get("example_fa", ""),
+            })
+            existing_pos.add(s_pos)
+            break
+
+    primary_pos = selected_senses[0]["pos"] if selected_senses else "Noun"
+
+    # Collocations: Merge Longman + Local BNC Collocations + Datamuse POS-matched Collocations
+    colls_raw: List[Dict[str, str]] = []
+    if not is_idiom_or_phrase:
+        seen_col = set()
+        for c in ldo["collocations"] + query_offline_bnc_collocations(clean):
+            t = c["term"].strip()
+            if t.lower() not in seen_col and t.lower() != low:
+                seen_col.add(t.lower())
+                colls_raw.append({"term": t, "example_en": c["example_en"]})
+
+        col_templates = [
+            "The situation required a {0} to succeed.",
+            "Everyone noticed the {0} right away.",
+            "Having a {0} made a significant difference.",
+        ]
+        for p in ox["colls"]:
+            if len(colls_raw) >= 3:
+                break
+            if p.lower() not in seen_col:
+                seen_col.add(p.lower())
+                ex_c = col_templates[len(colls_raw) % len(col_templates)].format(p)
+                colls_raw.append({"term": p, "example_en": ex_c})
+        colls_raw = colls_raw[:3]
+
+    syns_words = [
+        w for w in dict.fromkeys(cam["syns"] + ox["syns"])
+        if not is_spelling_or_root_duplicate(w, clean, root_lemma) and w.lower() not in WEAK_SYNONYMS
+    ][:3]
+    ants_words = [
+        w for w in dict.fromkeys(ox["ants"])
+        if not is_spelling_or_root_duplicate(w, clean, root_lemma) and w.lower() not in WEAK_SYNONYMS
+    ][:3]
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        syn_ex_futs = {w: pool.submit(fetch_verified_example_for_relation, w, primary_pos) for w in syns_words}
+        ant_ex_futs = {w: pool.submit(fetch_verified_example_for_relation, w, primary_pos) for w in ants_words}
+        syns_raw = [{"term": w, "example_en": syn_ex_futs[w].result()} for w in syns_words]
+        ants_raw = [{"term": w, "example_en": ant_ex_futs[w].result()} for w in ants_words]
+
+    core_idiom_meaning_en = ""
+    if is_idiom_or_phrase:
+        if low in OFFLINE_LEXICON.get("idioms", {}):
+            core_idiom_meaning_en = OFFLINE_LEXICON["idioms"][low]["meaning_en"]
+        elif selected_senses:
+            core_idiom_meaning_en = clean_definition_for_idiom_meaning(selected_senses[0]["def"])
+
+    sentences_to_tr: List[str] = []
+    short_terms_to_tr: List[str] = []
+    sentence_sub_map: Dict[str, str] = {}
+
+    if not fa_main:
+        if is_idiom_or_phrase and core_idiom_meaning_en:
+            short_terms_to_tr.append(core_idiom_meaning_en)
+        else:
+            short_terms_to_tr.append(clean)
+
+    for s in selected_senses:
+        ex_orig = s["example_en"]
+        if ex_orig and not s.get("example_fa"):
+            if is_idiom_or_phrase and core_idiom_meaning_en:
+                s_meaning = clean_definition_for_idiom_meaning(s["def"]) or core_idiom_meaning_en
+                ex_sub = substitute_idiom_in_sentence(ex_orig, clean, s_meaning)
+                sentence_sub_map[ex_orig] = ex_sub
+                sentences_to_tr.append(ex_sub)
+            else:
+                sentence_sub_map[ex_orig] = ex_orig
+                sentences_to_tr.append(ex_orig)
+
+    for c in colls_raw:
+        short_terms_to_tr.append(c["term"])
+        if c["example_en"]:
+            sentences_to_tr.append(c["example_en"])
+    for syn in syns_raw:
+        short_terms_to_tr.append(syn["term"])
+        if syn["example_en"]:
+            sentences_to_tr.append(syn["example_en"])
+    for ant in ants_raw:
+        short_terms_to_tr.append(ant["term"])
+        if ant["example_en"]:
+            sentences_to_tr.append(ant["example_en"])
+
+    trans_map = translate_batch_fast(sentences_to_tr, short_terms_to_tr)
+
+    if not fa_main or fa_main in INVALID_FA_HEADERS:
+        if deep_mode:
+            fa_main = auto_fix_translation_deep(clean)
+        elif is_idiom_or_phrase and core_idiom_meaning_en:
+            fa_main = trans_map.get(core_idiom_meaning_en, "")
+        else:
+            fa_main = trans_map.get(clean, "")
+
+    for s in selected_senses:
+        ex_orig = s["example_en"]
+        if ex_orig and not s.get("example_fa"):
+            if low in OFFLINE_LEXICON.get("idioms", {}) and ex_orig == OFFLINE_LEXICON["idioms"][low]["example"]:
+                s["example_fa"] = OFFLINE_LEXICON["idioms"][low]["example_fa"]
+            else:
+                sub_key = sentence_sub_map.get(ex_orig, ex_orig)
+                s["example_fa"] = trans_map.get(sub_key, "")
+
+    return {
+        "headword": clean,
+        "is_sentence": False,
+        "is_idiom": is_idiom_or_phrase,
+        "did_you_mean": did_you_mean,
+        "ipa_us": ipa_us,
+        "persian_equivalent": fa_main or "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f",
+        "senses": selected_senses,
+        "sentence_breakdown": [],
+        "collocations": [
+            {
+                "term": c["term"],
+                "ipa": to_ipa_us(c["term"]),
+                "fa": trans_map.get(c["term"], ""),
+                "example_en": c["example_en"],
+                "example_ipa": sentence_to_ipa(c["example_en"]),
+                "example_fa": trans_map.get(c["example_en"], ""),
+            }
+            for c in colls_raw
+        ],
+        "morphology": morphology,
+        "synonyms": [
+            {
+                "term": syn["term"],
+                "ipa": to_ipa_us(syn["term"]),
+                "fa": trans_map.get(syn["term"], ""),
+                "example_en": syn["example_en"],
+                "example_ipa": sentence_to_ipa(syn["example_en"]) if syn["example_en"] else "",
+                "example_fa": trans_map.get(syn["example_en"], "") if syn["example_en"] else "",
+            }
+            for syn in syns_raw
+        ],
+        "antonyms": [
+            {
+                "term": ant["term"],
+                "ipa": to_ipa_us(ant["term"]),
+                "fa": trans_map.get(ant["term"], ""),
+                "example_en": ant["example_en"],
+                "example_ipa": sentence_to_ipa(ant["example_en"]) if ant["example_en"] else "",
+                "example_fa": trans_map.get(ant["example_en"], "") if ant["example_en"] else "",
+            }
+            for ant in ants_raw
+        ],
+    }
