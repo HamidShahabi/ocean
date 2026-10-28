@@ -7,13 +7,14 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from PyQt6.QtCore import QCoreApplication  # noqa: E402
 from PyQt6.QtNetwork import QLocalSocket  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 import desktop_lookup  # noqa: E402
 from desktop_lookup import InstanceServer, clean_lookup_text, read_selected_text, read_x11_selection  # noqa: E402
 
-APP = QCoreApplication.instance() or QCoreApplication(sys.argv)
+# A QApplication rather than a QCoreApplication: the UI smoke test shares this process and needs the GUI flavour.
+APP = QApplication.instance() or QApplication(sys.argv)
 
 
 class CleanLookupTextTest(unittest.TestCase):

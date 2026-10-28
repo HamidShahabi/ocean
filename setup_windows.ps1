@@ -19,7 +19,7 @@ if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
     if ($LASTEXITCODE -ne 0) { throw $missing }
 }
 & .\.venv\Scripts\python.exe -m pip install --upgrade pip
-& .\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+& .\.venv\Scripts\python.exe -m pip install -r requirements.lock
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
 # lexical_engine.py looks in .\nltk_data first. NLTK_DATA must name the target dir
