@@ -4,7 +4,10 @@ import re
 import sys
 import html
 import json
+import shutil
+import logging
 import sqlite3
+from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Tuple
 import requests
@@ -24,8 +27,64 @@ def _get_engine_base_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _get_user_data_dir() -> str:
+    """Per-user writable folder; the install folder may be read-only (e.g. Program Files)."""
+    if sys.platform == "win32":
+        root = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        root = os.path.expanduser("~/Library/Application Support")
+    else:
+        root = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    path = os.path.join(root, "Ocean")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 ENGINE_BASE_DIR = _get_engine_base_dir()
-USER_MEMORY_FILE = os.path.join(ENGINE_BASE_DIR, "user_memory.json")
+USER_DATA_DIR = _get_user_data_dir()
+
+log = logging.getLogger("ocean")
+if not log.handlers:
+    _log_handler = RotatingFileHandler(os.path.join(USER_DATA_DIR, "ocean.log"), maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    _log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    log.addHandler(_log_handler)
+    log.setLevel(logging.INFO)
+
+
+def user_data_path(filename: str) -> str:
+    """Path of a user-written file in USER_DATA_DIR. On first use, copies (never moves) the newest
+    copy left next to the app by older versions, which kept user data in the install folder."""
+    target = os.path.join(USER_DATA_DIR, filename)
+    if os.path.exists(target):
+        return target
+    legacy = [
+        p for p in (
+            os.path.join(ENGINE_BASE_DIR, filename),
+            os.path.join(ENGINE_BASE_DIR, "dist", "Ocean", filename),
+        ) if os.path.isfile(p)
+    ]
+    if legacy:
+        src = max(legacy, key=os.path.getmtime)
+        try:
+            if filename.endswith(".db"):
+                # The backup API also captures writes still sitting in the -wal file.
+                s, d = sqlite3.connect(src), sqlite3.connect(target)
+                try:
+                    s.backup(d)
+                finally:
+                    s.close()
+                    d.close()
+            else:
+                shutil.copy2(src, target)
+            log.info("Migrated %s from %s", filename, src)
+        except Exception:
+            log.exception("Could not migrate %s from %s; starting fresh (original left untouched)", filename, src)
+            if os.path.exists(target):
+                os.remove(target)
+    return target
+
+
+USER_MEMORY_FILE = user_data_path("user_memory.json")
 OFFLINE_LEXICON_FILE = os.path.join(ENGINE_BASE_DIR, "offline_lexicon.json")
 OFFLINE_CORE_DB = os.path.join(ENGINE_BASE_DIR, "ocean_offline_core.db")
 OFFLINE_MT_DIR = os.path.join(ENGINE_BASE_DIR, "offline_mt_model")
@@ -43,12 +102,14 @@ try:
     from nltk.stem import WordNetLemmatizer
     LEMMATIZER = WordNetLemmatizer()
 except Exception:
+    log.warning("NLTK/WordNet unavailable: morphology and relations disabled", exc_info=True)
     wn = None
     LEMMATIZER = None
 
 try:
     import eng_to_ipa as ipa_engine
 except Exception:
+    log.warning("eng_to_ipa unavailable: IPA falls back to rule-based G2P", exc_info=True)
     ipa_engine = None
 
 try:
@@ -56,11 +117,22 @@ try:
     import sentencepiece as spm
     HAS_CT2_BACKUP = True
 except Exception:
+    log.warning("ctranslate2/sentencepiece unavailable: no offline translation", exc_info=True)
     HAS_CT2_BACKUP = False
 
 _CT2_TRANSLATOR = None
 _SP_PROCESSOR = None
 _CT2_IS_NLLB = False  # NLLB models need eng_Latn/pes_Arab language tokens; Marian-style models don't.
+
+
+def _log_failure(what: str) -> None:
+    """Call from an except block: one line for network errors, a traceback for anything
+    else (most likely a scraper broken by a site redesign)."""
+    exc = sys.exc_info()[1]
+    if isinstance(exc, requests.RequestException):
+        log.warning("%s: %s", what, exc.__class__.__name__)
+    else:
+        log.exception(what)
 
 
 def load_json_safe(path: str, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -69,7 +141,13 @@ def load_json_safe(path: str, default: Dict[str, Any]) -> Dict[str, Any]:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            pass
+            # Keep the unreadable file: the next save would otherwise overwrite it with defaults.
+            backup = path + ".corrupt"
+            log.exception("Could not read %s; keeping a copy at %s and using defaults", path, backup)
+            try:
+                shutil.copy2(path, backup)
+            except Exception:
+                log.exception("Could not back up %s", path)
     return dict(default)
 
 
@@ -86,6 +164,7 @@ def query_offline_core_lexicon(term: str) -> str:
             row = cur.fetchone()
             return row[0] if row else ""
     except Exception:
+        _log_failure("Offline core lexicon query failed")
         return ""
 
 
@@ -100,6 +179,7 @@ def query_offline_bnc_collocations(headword: str) -> List[Dict[str, str]]:
             )
             return [{"term": r[0], "example_en": r[1]} for r in cur.fetchall()]
     except Exception:
+        _log_failure("Offline collocation query failed")
         return []
 
 
@@ -137,16 +217,19 @@ def translate_offline_backup(text: str, is_short: bool = False) -> str:
                 decoded = _SP_PROCESSOR.decode(out_tokens)
                 return normalize_persian(decoded, is_short_term=is_short, source_en=clean)
         except Exception:
-            pass
+            _log_failure(f"Offline translator failed for {clean!r}")
     return ""
 
 
 def save_user_memory() -> None:
+    # Write-then-rename so a crash mid-save can't leave a truncated file.
+    tmp = USER_MEMORY_FILE + ".tmp"
     try:
-        with open(USER_MEMORY_FILE, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(USER_MEMORY, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, USER_MEMORY_FILE)
     except Exception:
-        pass
+        log.exception("Could not save %s", USER_MEMORY_FILE)
 
 
 def record_user_override(en_text: str, fa_text: str) -> None:
@@ -633,7 +716,7 @@ def fetch_wikipedia_persian_interlanguage_title(term: str) -> str:
                     if fa_title:
                         return fa_title
     except Exception:
-        pass
+        _log_failure(f"Wikipedia title lookup failed for {term!r}")
     return ""
 
 
@@ -695,7 +778,7 @@ def translate_via_clients5(text: str, is_short: bool = False) -> str:
                 if norm:
                     return norm
     except Exception:
-        pass
+        _log_failure(f"Google clients5 translation failed for {clean!r}")
     return ""
 
 
@@ -738,7 +821,7 @@ def translate_single_string(text: str, is_short: bool = False) -> str:
                 if norm:
                     return norm
     except Exception:
-        pass
+        _log_failure(f"Google translate failed for {clean!r}")
 
     # 2. Secondary: Clients5 Endpoint
     c5 = translate_via_clients5(clean, is_short=is_short)
@@ -854,7 +937,7 @@ def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[s
                         if tr:
                             out[orig] = tr
         except Exception:
-            pass
+            _log_failure("Batch translation failed")
 
     still_missing = [x for x in (remaining_sentences + remaining_shorts) if not out.get(x)]
     if still_missing:
@@ -964,7 +1047,7 @@ def fetch_tatoeba_open_corpus(term: str) -> List[Dict[str, str]]:
                 if en_txt and fa_txt:
                     pairs.append({"en": en_txt, "fa": fa_txt})
     except Exception:
-        pass
+        _log_failure(f"Tatoeba lookup failed for {term!r}")
     return pairs[:3]
 
 
@@ -980,7 +1063,7 @@ def fetch_live_suggestions(prefix: str) -> List[str]:
             remote = [item["word"] for item in r.json() if item.get("word")]
             return list(dict.fromkeys(user_keys + local_idioms + remote))[:7]
     except Exception:
-        pass
+        _log_failure(f"Datamuse suggestions failed for {prefix!r}")
     return list(dict.fromkeys(user_keys + local_idioms))[:7]
 
 
@@ -1038,7 +1121,7 @@ def fetch_cambridge_us(term: str) -> Dict[str, Any]:
                 if s_txt and s_txt.lower() != term.strip().lower() and s_txt.lower() not in WEAK_SYNONYMS:
                     out["syns"].append(s_txt)
     except Exception:
-        pass
+        _log_failure(f"Cambridge lookup failed for {term!r}")
     return out
 
 
@@ -1094,7 +1177,7 @@ def fetch_longman_ldoce(term: str) -> Dict[str, Any]:
                 if c_term and len(c_term) > 3 and c_ex:
                     out["collocations"].append({"term": c_term, "example_en": c_ex})
     except Exception:
-        pass
+        _log_failure(f"Longman lookup failed for {term!r}")
     return out
 
 
@@ -1138,7 +1221,7 @@ def fetch_idiom_and_web_fallback(term: str) -> Dict[str, Any]:
                         "example_en": ex_texts[0] if ex_texts else "",
                     })
     except Exception:
-        pass
+        _log_failure(f"TheFreeDictionary idiom lookup failed for {term!r}")
 
     if len(out["senses"]) < 2:
         try:
@@ -1159,7 +1242,7 @@ def fetch_idiom_and_web_fallback(term: str) -> Dict[str, Any]:
                                 "example_en": clean_english_sentence(ex_s) if ex_s else "",
                             })
         except Exception:
-            pass
+            _log_failure(f"Wiktionary lookup failed for {term!r}")
 
     if not out["senses"] and len(words) >= 2:
         linking_verbs = {"get": "To become", "become": "To become", "grow": "To gradually become", "turn": "To turn or become", "feel": "To feel", "go": "To become"}
@@ -1218,7 +1301,7 @@ def fetch_oxford_and_relations(term: str, is_idiom: bool, root_lemma: str) -> Di
                             if d_txt and len(d_txt.split()) >= 2:
                                 out["senses"].append({"pos": pos, "def": d_txt, "example_en": ex_txt})
     except Exception:
-        pass
+        _log_failure(f"dictionaryapi.dev lookup failed for {term!r}")
 
     if wn and not is_idiom:
         try:
@@ -1244,7 +1327,7 @@ def fetch_oxford_and_relations(term: str, is_idiom: bool, root_lemma: str) -> Di
                         if not is_spelling_or_root_duplicate(ant_name, clean, root_lemma):
                             out["ants"].append(ant_name)
         except Exception:
-            pass
+            _log_failure(f"WordNet relations failed for {term!r}")
 
     if not is_idiom:
         try:
@@ -1278,7 +1361,7 @@ def fetch_oxford_and_relations(term: str, is_idiom: bool, root_lemma: str) -> Di
                             if adj and adj not in STOPWORDS and len(adj) > 3 and adj.isalpha():
                                 out["colls"].append(f"{adj} {low}")
         except Exception:
-            pass
+            _log_failure(f"Datamuse relations failed for {term!r}")
 
     return out
 
@@ -1320,7 +1403,7 @@ def fetch_verified_example_for_relation(word: str, target_pos: str = "") -> str:
                     if sentence_contains_target(ex, clean) and len(ex.split()) >= 5 and "'" not in ex:
                         return clean_english_sentence(ex)
         except Exception:
-            pass
+            _log_failure(f"WordNet example lookup failed for {word!r}")
 
     try:
         r = smart_request("GET", f"https://api.dictionaryapi.dev/api/v2/entries/en/{clean}", timeout=1.8)
@@ -1335,7 +1418,7 @@ def fetch_verified_example_for_relation(word: str, target_pos: str = "") -> str:
                         if ex and sentence_contains_target(ex, clean) and len(ex.split()) >= 5:
                             return clean_english_sentence(ex)
     except Exception:
-        pass
+        _log_failure(f"dictionaryapi.dev example lookup failed for {word!r}")
 
     return generate_pos_matched_example(clean, target_pos or "Noun")
 

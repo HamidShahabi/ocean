@@ -5,6 +5,7 @@ import re
 import sys
 import json
 import wave
+import logging
 import shutil
 import sqlite3
 import subprocess
@@ -15,7 +16,7 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lexical_engine
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QBuffer, QIODevice, QTimer, QPoint, QRectF, QSize, QEvent, QObject
+from PyQt6.QtCore import Qt, QThread, QDeadlineTimer, pyqtSignal, QBuffer, QIODevice, QTimer, QPoint, QRectF, QSize, QEvent, QObject
 from PyQt6.QtGui import (
     QFont,
     QFontDatabase,
@@ -79,6 +80,8 @@ WAV_PLAYER_CMD = next(
 )
 FALLBACK_TTS_BIN = shutil.which("spd-say") or shutil.which("espeak-ng") or shutil.which("espeak")
 
+log = logging.getLogger("ocean.app")
+
 
 def get_base_dir() -> str:
     if getattr(sys, "frozen", False):
@@ -93,8 +96,8 @@ def get_base_dir() -> str:
 
 
 BASE_DIR = get_base_dir()
-DB_FILE = os.path.join(BASE_DIR, "lexicon_vault.db")
-SETTINGS_FILE = os.path.join(BASE_DIR, "ocean_settings.json")
+DB_FILE = lexical_engine.user_data_path("lexicon_vault.db")
+SETTINGS_FILE = lexical_engine.user_data_path("ocean_settings.json")
 
 EN_FONT_FAMILY = "Inter"
 FA_FONT_FAMILY = "Vazirmatn"
@@ -290,14 +293,14 @@ class SettingsManager:
                 if self.data.get("voice_id") not in VOICE_OPTIONS:
                     self.data["voice_id"] = VOICE_OPTIONS[0]
             except Exception:
-                pass
+                log.exception("Could not read settings %s; using defaults", self.path)
 
     def save(self) -> None:
         try:
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2)
         except Exception:
-            pass
+            log.exception("Could not save settings %s", self.path)
 
 
 class NeuralSpeaker:
@@ -329,7 +332,10 @@ class NeuralSpeaker:
             try:
                 self._kokoro = Kokoro(onnx_p, voic_p)
             except Exception:
+                log.exception("Could not load Kokoro voice model %s", onnx_p)
                 self._kokoro = None
+        else:
+            log.info("Kokoro model files not found; using fallback voice")
 
     def speak(self, text: str) -> None:
         clean = text.strip()
@@ -365,8 +371,9 @@ class NeuralSpeaker:
 
                 if self._play_wav(buf.getvalue()):
                     return
+                log.warning("No WAV player found (pw-play/paplay/aplay); using fallback voice")
             except Exception:
-                pass
+                log.exception("Kokoro speech failed")
 
         if HAS_WIN32_SAPI:
             try:
@@ -376,7 +383,7 @@ class NeuralSpeaker:
                 escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 v.Speak(f'<silence msec="120"/>{escaped}<silence msec="450"/>', 8)
             except Exception:
-                pass
+                log.exception("Windows SAPI speech failed")
         elif FALLBACK_TTS_BIN:
             # SAPI rate is -10..10; spd-say takes -100..100, espeak takes words-per-minute.
             if os.path.basename(FALLBACK_TTS_BIN) == "spd-say":
@@ -386,7 +393,7 @@ class NeuralSpeaker:
             try:
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
             except Exception:
-                pass
+                log.exception("Fallback speech (%s) failed", FALLBACK_TTS_BIN)
 
     def _play_wav(self, wav_bytes: bytes) -> bool:
         if HAS_WINSOUND:
@@ -505,6 +512,32 @@ class DatabaseManager:
 
 
 # === SECTION 5: BACKGROUND WORKERS ===
+_RUNNING_WORKERS: set = set()
+
+
+def start_worker(worker: QThread) -> None:
+    """Start a worker and keep it referenced until it finishes: a running QThread whose
+    Python wrapper gets garbage-collected (e.g. replaced by a newer search) aborts the process."""
+    _RUNNING_WORKERS.add(worker)
+    worker.finished.connect(lambda: _RUNNING_WORKERS.discard(worker))
+    worker.finished.connect(worker.deleteLater)
+    worker.start()
+
+
+def exit_app(exit_code: int, grace_ms: int = 2000) -> None:
+    """Exit after the event loop ends. Workers still busy (e.g. a slow lookup) would crash
+    Python's teardown, which destroys their running QThreads; workers only read, and every
+    save happens synchronously on the GUI thread, so skipping the teardown loses nothing."""
+    deadline = QDeadlineTimer(grace_ms)
+    for worker in list(_RUNNING_WORKERS):
+        worker.wait(deadline)
+    if any(w.isRunning() for w in _RUNNING_WORKERS):
+        log.info("Workers still running at exit; skipping interpreter teardown")
+        logging.shutdown()
+        os._exit(exit_code)
+    sys.exit(exit_code)
+
+
 class SuggestionWorker(QThread):
     suggestions_ready = pyqtSignal(list)
 
@@ -537,6 +570,7 @@ class EngineWorker(QThread):
             res = lexical_engine.analyze_with_dictionaries(self.term, deep_mode=self.deep_mode)
             self.finished_success.emit(res.get("headword", self.term), res)
         except Exception as exc:
+            log.exception("Lookup failed for %r", self.term)
             self.finished_error.emit(str(exc))
 
 
@@ -881,7 +915,7 @@ class PersianTranslationWidget(QWidget):
         self.autofix_btn.setEnabled(False)
         self._fix_worker = AutoFixWorker(self.en_source)
         self._fix_worker.fixed_ready.connect(self._on_auto_fixed)
-        self._fix_worker.start()
+        start_worker(self._fix_worker)
 
     def _on_auto_fixed(self, new_fa: str) -> None:
         self.autofix_btn.setText("Auto-Fix")
@@ -1687,9 +1721,11 @@ class MainWindow(QMainWindow):
         local_words = [x["display_term"] for x in self.db.list_entries(False)]
         self.sug_worker = SuggestionWorker(txt, local_words)
         self.sug_worker.suggestions_ready.connect(self._on_suggestions_ready)
-        self.sug_worker.start()
+        start_worker(self.sug_worker)
 
     def _on_suggestions_ready(self, items: List[str]) -> None:
+        if self.sender() is not self.sug_worker:
+            return  # superseded by a newer keystroke
         if not items or not self.input_box.hasFocus():
             self.sug_popup.hide()
             return
@@ -1727,6 +1763,8 @@ class MainWindow(QMainWindow):
         if not force_refresh and not deep_mode:
             cached = self.db.get_entry(term)
             if cached and (cached.get("senses") or cached.get("is_sentence")):
+                self.worker = None  # any lookup still running is now stale
+                self.explore_btn.setEnabled(True)
                 self.current_term = term
                 self.current_data = cached
                 self._render_result(term, cached)
@@ -1739,9 +1777,12 @@ class MainWindow(QMainWindow):
         self.worker = EngineWorker(term, deep_mode=deep_mode)
         self.worker.finished_success.connect(self._on_inference_success)
         self.worker.finished_error.connect(self._on_inference_error)
-        self.worker.start()
+        start_worker(self.worker)
 
     def _on_inference_success(self, term: str, data: Dict[str, Any]) -> None:
+        if self.sender() is not self.worker:
+            return  # a newer search or history navigation superseded this lookup
+        self.worker = None
         self.explore_btn.setEnabled(True)
         self.input_box.setText(data.get("headword", term))
         self.db.save_entry(term, data)
@@ -1754,6 +1795,9 @@ class MainWindow(QMainWindow):
         self.status_label.setText("")
 
     def _on_inference_error(self, error_msg: str) -> None:
+        if self.sender() is not self.worker:
+            return
+        self.worker = None
         self.explore_btn.setEnabled(True)
         self.status_label.setText("")
         QMessageBox.warning(self, "Ocean Notice", error_msg)
@@ -2577,7 +2621,7 @@ def main() -> None:
     register_custom_fonts()
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    exit_app(app.exec())
 
 
 if __name__ == "__main__":

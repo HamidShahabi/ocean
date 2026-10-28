@@ -21,7 +21,8 @@ if (-not (Test-Path ".\ocean.ico")) {
 
 & ".\.venv\Scripts\pyinstaller.exe" --noconfirm --noconsole --onedir --paths="." --hidden-import=lexical_engine --hidden-import=bs4 --hidden-import=lxml --hidden-import=kokoro_onnx --hidden-import=eng_to_ipa --hidden-import=nltk --hidden-import=ctranslate2 --hidden-import=sentencepiece --name "Ocean" --icon="ocean.ico" app.py
 
-foreach ($f in @("lexical_engine.py", "offline_lexicon.json", "user_memory.json", "ocean_offline_core.db", "lexicon_vault.db", "ocean_settings.json")) {
+# User data (history, memory, settings) lives in %APPDATA%\Ocean, not in the build.
+foreach ($f in @("lexical_engine.py", "offline_lexicon.json", "ocean_offline_core.db")) {
     if (Test-Path $f) {
         Copy-Item -Path $f -Destination ".\dist\Ocean\$f" -Force
         Copy-Item -Path $f -Destination ".\dist\Ocean\_internal\$f" -Force
