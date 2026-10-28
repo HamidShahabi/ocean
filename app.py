@@ -16,6 +16,7 @@ from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kokoro_files
 import lexical_engine
 import review
 import anki_export
@@ -321,18 +322,12 @@ class NeuralSpeaker:
         threading.Thread(target=self._init_kokoro).start()
 
     def _find_model_files(self) -> tuple[str, str]:
-        candidates = [
+        frozen = getattr(sys, "frozen", False)
+        return kokoro_files.find_kokoro_files([
             BASE_DIR,
-            os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else "",
-            os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "..")) if getattr(sys, "frozen", False) else "",
-        ]
-        for c in candidates:
-            if c:
-                onnx_p = os.path.join(c, "kokoro-v1.0.onnx")
-                voic_p = os.path.join(c, "voices-v1.0.bin")
-                if os.path.exists(onnx_p) and os.path.exists(voic_p):
-                    return onnx_p, voic_p
-        return "", ""
+            os.path.dirname(sys.executable) if frozen else "",
+            os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "..")) if frozen else "",
+        ])
 
     def _init_kokoro(self) -> None:
         if not HAS_KOKORO:

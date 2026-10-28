@@ -28,7 +28,10 @@ $env:NLTK_DATA = Join-Path $PSScriptRoot "nltk_data"
 & .\.venv\Scripts\python.exe -m nltk.downloader -d $env:NLTK_DATA wordnet omw-1.4
 
 $kokoroUrl = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
-Get-File "$kokoroUrl/kokoro-v1.0.onnx" "kokoro-v1.0.onnx"
+# int8 model (~88 MB); an existing full-size kokoro-v1.0.onnx is used as is and not replaced.
+if (-not (Test-Path "kokoro-v1.0.onnx")) {
+    Get-File "$kokoroUrl/kokoro-v1.0.int8.onnx" "kokoro-v1.0.int8.onnx"
+}
 Get-File "$kokoroUrl/voices-v1.0.bin" "voices-v1.0.bin"
 
 # Offline EN->FA backup translator: NLLB-200 distilled 600M, CTranslate2 int8.

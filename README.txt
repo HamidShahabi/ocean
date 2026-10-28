@@ -5,7 +5,7 @@ WINDOWS
   1. Install Python 3.12 from https://www.python.org/downloads/windows/
      (keep "py launcher" ticked in the installer).
   2. Unzip this folder somewhere without spaces/permission issues, e.g. C:\Ocean
-  3. Open PowerShell in that folder and run (one time, needs internet, ~1 GB download):
+  3. Open PowerShell in that folder and run (one time, needs internet, ~800 MB download):
          powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
   4. Start the app:  double-click run.bat
   5. Optional - build a portable Ocean.exe (output in dist\Ocean\):
@@ -52,6 +52,12 @@ YOUR DATA
   are stored per user, so updating or rebuilding the app never touches them:
       Windows: %APPDATA%\Ocean        Linux: ~/.local/share/Ocean
   Data from older versions (kept next to the app) is copied there on first start.
+
+VOICE
+  Pronunciation uses the Kokoro neural voice. The setup script downloads the small
+  int8 model (kokoro-v1.0.int8.onnx, ~88 MB). If you already have the full-size
+  kokoro-v1.0.onnx (~310 MB) next to the app it keeps working, but the int8 file
+  is preferred when both are present. Delete the full-size file to save space.
 
 OFFLINE MODE
   Online dictionaries and Google Translate are used when available. Without
