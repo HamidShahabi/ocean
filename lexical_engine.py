@@ -7,6 +7,7 @@ import json
 import shutil
 import logging
 import sqlite3
+import threading
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Tuple
@@ -123,6 +124,7 @@ except Exception:
 _CT2_TRANSLATOR = None
 _SP_PROCESSOR = None
 _CT2_IS_NLLB = False  # NLLB models need eng_Latn/pes_Arab language tokens; Marian-style models don't.
+_CT2_LOAD_LOCK = threading.Lock()  # a lookup arriving mid-preload waits on this instead of loading twice
 
 
 def _log_failure(what: str) -> None:
@@ -183,22 +185,52 @@ def query_offline_bnc_collocations(headword: str) -> List[Dict[str, str]]:
         return []
 
 
+def _load_ct2_model() -> None:
+    """Load the CTranslate2 model once; concurrent callers wait for the load in progress."""
+    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB
+    with _CT2_LOAD_LOCK:
+        if _CT2_TRANSLATOR is not None and _SP_PROCESSOR is not None:
+            return
+        sp_p = os.path.join(OFFLINE_MT_DIR, "sentencepiece.model")
+        md_p = os.path.join(OFFLINE_MT_DIR, "model")
+        if not (os.path.exists(sp_p) and os.path.isdir(md_p)):
+            return
+        sp_proc = spm.SentencePieceProcessor(model_file=sp_p)
+        translator = ctranslate2.Translator(md_p, device="cpu", compute_type="int8")
+        vocab_p = os.path.join(md_p, "shared_vocabulary.txt")
+        if os.path.exists(vocab_p):
+            with open(vocab_p, encoding="utf-8") as vf:
+                _CT2_IS_NLLB = any(line.strip() == "pes_Arab" for line in vf)
+        _SP_PROCESSOR, _CT2_TRANSLATOR = sp_proc, translator
+
+
+def preload_offline_translator() -> threading.Thread:
+    """Load the offline model in the background so the first offline lookup doesn't stall.
+    Not a daemon: quitting while the native model is mid-load crashes the process, so
+    interpreter shutdown waits for the load to finish (same as the Kokoro voice model)."""
+    def run() -> None:
+        if not HAS_CT2_BACKUP:
+            return
+        try:
+            _load_ct2_model()
+            if _CT2_TRANSLATOR is None:
+                log.info("Offline translation model not found in %s", OFFLINE_MT_DIR)
+            else:
+                log.info("Offline translation model loaded")
+        except Exception:
+            log.exception("Could not preload the offline translation model")
+
+    thread = threading.Thread(target=run, name="ct2-preload")
+    thread.start()
+    return thread
+
+
 def _ct2_translate(text: str, to_english: bool = False) -> str:
     """Raw offline translation with the CTranslate2 model (EN->FA, or FA->EN with an NLLB model)."""
-    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB
     if not HAS_CT2_BACKUP:
         return ""
     try:
-        if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
-            sp_p = os.path.join(OFFLINE_MT_DIR, "sentencepiece.model")
-            md_p = os.path.join(OFFLINE_MT_DIR, "model")
-            if os.path.exists(sp_p) and os.path.isdir(md_p):
-                _SP_PROCESSOR = spm.SentencePieceProcessor(model_file=sp_p)
-                _CT2_TRANSLATOR = ctranslate2.Translator(md_p, device="cpu", compute_type="int8")
-                vocab_p = os.path.join(md_p, "shared_vocabulary.txt")
-                if os.path.exists(vocab_p):
-                    with open(vocab_p, encoding="utf-8") as vf:
-                        _CT2_IS_NLLB = any(line.strip() == "pes_Arab" for line in vf)
+        _load_ct2_model()
         if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
             return ""
         tokens = _SP_PROCESSOR.encode(text, out_type=str)
