@@ -1,6 +1,6 @@
 """Results page: renders a lookup payload as cards (overview, collocations, morphology, ...)."""
 import re
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCursor
@@ -78,6 +78,28 @@ class ResultsPage(QWidget):
         px = int(self.main_win.settings.data.get("base_font_px", 14))
         mode = self.main_win.settings.data.get("learning_mode", "Click to Reveal Persian")
         return PersianTranslationWidget(text, px, mode, en_source=en_source, main_win=self.main_win, large=large)
+
+    def _create_level_badges(self, data: Dict[str, Any]) -> Optional[QHBoxLayout]:
+        """CEFR level and frequency band of an English word, whichever of the two is known."""
+        level = data.get("cefr_level", "")
+        band = data.get("frequency_band", "")
+        per_million = data.get("frequency_per_million")
+        if not (level or band):
+            return None
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        if level:
+            badge = QLabel(level)
+            badge.setObjectName("LevelBadge")
+            badge.setToolTip(f"CEFR level {level} (CEFR-J Wordlist / Octanove vocabulary profile)")
+            row.addWidget(badge)
+        if band:
+            badge = QLabel(band)
+            badge.setObjectName("FrequencyBadge")
+            badge.setToolTip(f"About {per_million:g} occurrences per million words (Datamuse)" if per_million is not None else band)
+            row.addWidget(badge)
+        row.addStretch(1)
+        return row
 
     def _highlight_phrase(self, sentence: str, phrase: str) -> str:
         accent = THEME_COLORS["accent"]
@@ -367,6 +389,9 @@ class ResultsPage(QWidget):
             hw_lay.addWidget(self._create_persian_widget(fa_equiv, en_source=headword, large=True), stretch=1)
 
         vbox1.addWidget(hw_box)
+        badge_row = self._create_level_badges(data)
+        if badge_row is not None:
+            vbox1.addLayout(badge_row)
 
         for idx, s_item in enumerate(senses, start=1):
             s_box = SmoothGlassFrame(radius=18, variant="inner")

@@ -316,6 +316,23 @@ def apply_theme(settings_data: dict) -> str:
             background: transparent;
             border: none;
         }}
+        QLabel#LevelBadge {{
+            color: {c['accent']};
+            background: transparent;
+            border: 1px solid {c['accent']};
+            border-radius: 10px;
+            padding: 2px 10px;
+            font-size: {px - 1}px;
+            font-weight: 700;
+        }}
+        QLabel#FrequencyBadge {{
+            color: {c['text_muted']};
+            background: transparent;
+            border: 1px solid {c['border']};
+            border-radius: 10px;
+            padding: 2px 10px;
+            font-size: {px - 1}px;
+        }}
         QLabel#BodyText {{
             color: {c['text_main']};
             font-size: {px}px;

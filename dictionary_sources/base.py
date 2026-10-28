@@ -37,6 +37,7 @@ class PartialEntry:
     collocations: List[Dict[str, str]] = field(default_factory=list)      # {"term", "example_en"}
     collocation_terms: List[str] = field(default_factory=list)            # bare phrases, example made up later
     examples: List[Dict[str, str]] = field(default_factory=list)          # {"en", "fa"} sentence pairs
+    frequency: Optional[float] = None                                     # occurrences per million words
 
 
 class DictionarySource:
@@ -65,11 +66,13 @@ class DictionarySource:
 
 
 def merge_entries(entries: Iterable[PartialEntry]) -> PartialEntry:
-    """Lists concatenate in the order given; ipa_us and primary_pos come from the first entry that has one."""
+    """Lists concatenate in the order given; ipa_us, primary_pos and frequency come from the first entry that has one."""
     merged = PartialEntry()
     for e in entries:
         merged.ipa_us = merged.ipa_us or e.ipa_us
         merged.primary_pos = merged.primary_pos or e.primary_pos
+        if merged.frequency is None:
+            merged.frequency = e.frequency
         merged.senses += e.senses
         merged.syns += e.syns
         merged.ants += e.ants
