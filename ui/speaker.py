@@ -7,7 +7,9 @@ import subprocess
 import sys
 import threading
 import wave
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from ui.config import BASE_DIR, VOICE_OPTIONS, SettingsManager
 
@@ -40,11 +42,30 @@ FALLBACK_TTS_BIN = shutil.which("spd-say") or shutil.which("espeak-ng") or shuti
 
 log = logging.getLogger("ocean.app")
 
-class NeuralSpeaker:
+# Silence added around the Kokoro samples; the lead-in is how long after playback starts speech begins.
+LEAD_IN_SECS = 0.12
+TAIL_SECS = 0.45
+
+
+class NeuralSpeaker(QObject):
+    """Speaks text. Signals (emitted from the playback thread; Qt queues them to GUI-thread receivers):
+
+    clip_started(token, lead_in, duration): playback of the clip `speak()` returned `token` for has
+        begun; speech starts `lead_in` s in and lasts `duration` s. Fallback voices (SAPI / CLI) give
+        no length, so they report duration 0: play without word timing.
+    playback_stopped(token): that clip ended or was cut off by stop() / the next speak().
+    """
+    clip_started = pyqtSignal(int, float, float)
+    playback_stopped = pyqtSignal(int)
+
     def __init__(self, settings: SettingsManager) -> None:
+        super().__init__()
         self.settings = settings
         self._kokoro: Optional[Any] = None
         self._player: Optional[subprocess.Popen] = None
+        # Id of the newest clip; a worker whose id is stale was superseded and must stay silent.
+        self._token = 0
+        self._play_lock = threading.Lock()
         # Not a daemon: quitting while onnxruntime is mid-load (~1s after start) crashes the process,
         # so let interpreter shutdown wait for the load to finish.
         threading.Thread(target=self._init_kokoro).start()
@@ -76,13 +97,40 @@ class NeuralSpeaker:
         else:
             log.info("Kokoro model files not found; using fallback voice")
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str) -> int:
+        """Start speaking `text`, cutting off any clip still playing. Returns the clip's token (0 if empty)."""
         clean = text.strip()
         if not clean:
-            return
-        threading.Thread(target=self._speak_worker, args=(clean,), daemon=True).start()
+            return 0
+        self._cut()
+        token = self._token
+        threading.Thread(target=self._speak_worker, args=(clean, token), daemon=True).start()
+        return token
 
-    def _speak_worker(self, text: str) -> None:
+    def stop(self) -> None:
+        self._cut()
+
+    def _cut(self) -> None:
+        """Supersede the current clip: silence it and tell listeners it is over."""
+        previous = self._token
+        self._token += 1
+        with self._play_lock:
+            if HAS_WINSOUND:
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            player = self._player
+            if player is not None and player.poll() is None:
+                player.terminate()
+        if previous:
+            self.playback_stopped.emit(previous)
+
+    def _speak_worker(self, text: str, token: int) -> None:
+        try:
+            self._speak(text, token)
+        finally:
+            if token == self._token:
+                self.playback_stopped.emit(token)
+
+    def _speak(self, text: str, token: int) -> None:
         voice_choice = self.settings.data.get("voice_id", VOICE_OPTIONS[0])
         rate_offset = int(self.settings.data.get("speech_rate", 0))
         speed = max(0.75, min(1.3, 1.0 + (rate_offset * 0.08)))
@@ -96,8 +144,8 @@ class NeuralSpeaker:
                 samples, sample_rate = self._kokoro.create(
                     text, voice=voice_code, speed=speed, lang="en-us"
                 )
-                pad_start = np.zeros(int(sample_rate * 0.12), dtype=np.float32)
-                pad_end = np.zeros(int(sample_rate * 0.45), dtype=np.float32)
+                pad_start = np.zeros(int(sample_rate * LEAD_IN_SECS), dtype=np.float32)
+                pad_end = np.zeros(int(sample_rate * TAIL_SECS), dtype=np.float32)
                 full_audio = np.concatenate([pad_start, samples, pad_end])
                 pcm16 = (np.clip(full_audio, -1.0, 1.0) * 32767).astype(np.int16)
 
@@ -108,13 +156,19 @@ class NeuralSpeaker:
                     wf.setframerate(sample_rate)
                     wf.writeframes(pcm16.tobytes())
 
-                if self._play_wav(buf.getvalue()):
+                def announce() -> None:
+                    self.clip_started.emit(token, LEAD_IN_SECS, len(samples) / sample_rate)
+
+                if self._play_wav(buf.getvalue(), token, announce):
                     return
                 log.warning("No WAV player found (pw-play/paplay/aplay); using fallback voice")
             except Exception:
                 log.exception("Kokoro speech failed")
 
+        if token != self._token:
+            return
         if HAS_WIN32_SAPI:
+            self.clip_started.emit(token, 0.0, 0.0)
             try:
                 pythoncom.CoInitialize()
                 v = win32com.client.Dispatch("SAPI.SpVoice")
@@ -130,23 +184,35 @@ class NeuralSpeaker:
             else:
                 cmd = [FALLBACK_TTS_BIN, "-s", str(175 + rate_offset * 15), "--", text]
             try:
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+                with self._play_lock:
+                    if token != self._token:
+                        return
+                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self._player = proc
+                self.clip_started.emit(token, 0.0, 0.0)
+                try:
+                    proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
             except Exception:
                 log.exception("Fallback speech (%s) failed", FALLBACK_TTS_BIN)
 
-    def _play_wav(self, wav_bytes: bytes) -> bool:
+    def _play_wav(self, wav_bytes: bytes, token: int, on_start: Callable[[], None]) -> bool:
+        """Play the clip, calling `on_start` as playback begins. False if there is no player to use."""
         if HAS_WINSOUND:
-            winsound.PlaySound(None, winsound.SND_PURGE)
+            if token != self._token:
+                return True
+            on_start()
             winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
             return True
         if WAV_PLAYER_CMD is None:
             return False
-        # Stop any clip still playing, mirroring SND_PURGE.
-        prev = self._player
-        if prev is not None and prev.poll() is None:
-            prev.terminate()
-        proc = subprocess.Popen(WAV_PLAYER_CMD, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self._player = proc
+        with self._play_lock:
+            if token != self._token:
+                return True  # superseded while synthesizing: stay silent
+            proc = subprocess.Popen(WAV_PLAYER_CMD, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._player = proc
+        on_start()
         try:
             proc.communicate(wav_bytes, timeout=120)
         except (BrokenPipeError, subprocess.TimeoutExpired):
