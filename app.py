@@ -18,7 +18,8 @@ from bs4 import BeautifulSoup
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lexical_engine
 import review
-from PyQt6.QtCore import Qt, QThread, QDeadlineTimer, pyqtSignal, QBuffer, QIODevice, QTimer, QPoint, QRectF, QSize, QEvent, QObject
+import anki_export
+from PyQt6.QtCore import Qt, QThread, QDeadlineTimer, QStandardPaths, pyqtSignal, QBuffer, QIODevice, QTimer, QPoint, QRectF, QSize, QEvent, QObject
 from PyQt6.QtGui import (
     QFont,
     QFontDatabase,
@@ -53,6 +54,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QSizePolicy,
     QDialog,
+    QFileDialog,
 )
 
 try:
@@ -1101,7 +1103,20 @@ class AttachedRightDrawer(SmoothGlassFrame):
         del_btn.setFixedHeight(36)
         del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         del_btn.clicked.connect(self._delete_hist_item)
-        h_lay.addWidget(del_btn)
+
+        export_btn = QPushButton("Export to Anki")
+        export_btn.setObjectName("GlassPillButton")
+        export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        export_btn.setFixedHeight(36)
+        export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        export_btn.setToolTip("Export the entries listed above as an Anki import file")
+        export_btn.clicked.connect(self._export_anki)
+
+        hist_btns = QHBoxLayout()
+        hist_btns.setSpacing(10)
+        hist_btns.addWidget(del_btn, stretch=1)
+        hist_btns.addWidget(export_btn, stretch=1)
+        h_lay.addLayout(hist_btns)
         self.stack.addWidget(page_hist)
 
         # PAGE 2: Settings View (Removed Gemini AI Key as requested in Image 4)
@@ -1361,6 +1376,32 @@ class AttachedRightDrawer(SmoothGlassFrame):
                 self.main_win.db.delete_entry(key)
                 self.main_win.refresh_review_badges()
                 self.populate_history()
+
+    def _export_anki(self) -> None:
+        fav_only = "Saved" in self.filter_drop.currentText()
+        db = self.main_win.db
+        payloads = [p for p in (db.get_entry(e["query_key"]) for e in db.list_entries(favorites_only=fav_only)) if p]
+        if not payloads:
+            QMessageBox.information(self, "Ocean Notice", "Nothing to export yet.")
+            return
+        docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or os.path.expanduser("~")
+        path, _ = QFileDialog.getSaveFileName(self, "Export to Anki", os.path.join(docs, "Ocean-anki.txt"), "Text files (*.txt)")
+        if not path:
+            return
+        text, count = anki_export.build_anki_tsv(payloads)
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        except OSError as exc:
+            log.exception("Anki export to %s failed", path)
+            QMessageBox.warning(self, "Ocean Notice", f"Could not write the export file:\n{exc}")
+            return
+        QMessageBox.information(
+            self, "Ocean",
+            f"Exported {count} notes to:\n{path}\n\n"
+            f"In Anki choose File \u2192 Import and pick this file. Notes go into the "
+            f"\u201c{anki_export.DECK_NAME}\u201d deck; importing again later updates them.",
+        )
 
     def _collect_settings(self) -> None:
         scale_map = {

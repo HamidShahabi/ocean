@@ -22,6 +22,12 @@ REVIEW (SPACED REPETITION)
   (Again / Hard / Good / Easy). Esc ends the session. Words come back for review
   at growing intervals (SM-2 scheduling); un-starring a word pauses it.
 
+EXPORT TO ANKI
+  Menu > History > Export to Anki writes the listed entries (all searches, or
+  saved words only, following the filter) to a text file. In Anki (2.1.55+)
+  choose File > Import and pick it: notes land in the "Ocean" deck with
+  Persian, IPA, definitions and examples. Importing again updates them.
+
 YOUR DATA
   History, favourites, your translation fixes, settings and the log file (ocean.log)
   are stored per user, so updating or rebuilding the app never touches them:
