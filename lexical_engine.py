@@ -89,6 +89,11 @@ def user_data_path(filename: str) -> str:
     return target
 
 
+# Bump when lookups improve (new sources, better translations, fixed bugs): saved entries produced
+# by an older version get fetched again on their next lookup (see storage.is_stale).
+# Entries saved before versions were recorded count as version 0.
+ENGINE_VERSION = 1
+
 USER_MEMORY_FILE = user_data_path("user_memory.json")
 OFFLINE_LEXICON_FILE = os.path.join(ENGINE_BASE_DIR, "offline_lexicon.json")
 CEFR_LEVELS_FILE = os.path.join(ENGINE_BASE_DIR, "cefr_levels.json")
@@ -136,6 +141,8 @@ def _log_failure(what: str) -> None:
     """Call from an except block: one line for network errors, a traceback for anything
     else (most likely a scraper broken by a site redesign)."""
     exc = sys.exc_info()[1]
+    if isinstance(exc, OfflineModeError):
+        return  # offline-only mode refusing a request is expected, not a failure
     if isinstance(exc, requests.RequestException):
         log.warning("%s: %s", what, exc.__class__.__name__)
     else:
@@ -308,6 +315,38 @@ def delete_taught_entry(term: str) -> None:
         save_user_memory()
 
 
+def apply_user_overrides(data: Dict[str, Any], overrides: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Put your manual Persian fixes (USER_MEMORY overrides, keyed by lower-case English text) back
+    into a freshly fetched entry. Lookups already honour overrides for translations they make
+    themselves; this also covers Persian that came ready-made from a dictionary source (e.g. example
+    sentences), so refreshing an entry never undoes a hand edit. Changes `data` in place."""
+    if overrides is None:
+        overrides = USER_MEMORY.get("overrides", {})
+    if not overrides:
+        return data
+
+    def fix(en: Any) -> str:
+        return overrides.get(en.strip().lower(), "") if isinstance(en, str) else ""
+
+    if not data.get("is_reverse"):
+        fa = fix(data.get("headword"))
+        if fa:
+            data["persian_equivalent"] = fa
+    for s in data.get("senses", []):
+        fa = fix(s.get("example_en"))
+        if fa:
+            s["example_fa"] = fa
+    for grp in ("collocations", "synonyms", "antonyms", "sentence_breakdown"):
+        for item in data.get(grp, []):
+            fa = fix(item.get("term"))
+            if fa:
+                item["fa"] = fa
+            fa = fix(item.get("example_en"))
+            if fa:
+                item["example_fa"] = fa
+    return data
+
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
@@ -368,6 +407,7 @@ FALSE_BOUND_STEMS = {
     "peat", "liberate", "liver", "mand", "note"
 }
 
+NOT_FOUND_FA = "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f"  # shown when no translation was found
 INVALID_FA_HEADERS = {
     "\u0645\u0639\u0646\u06cc", "\u0645\u0639\u0627\u0646\u06cc", "\u062a\u0631\u062c\u0645\u0647",
     "\u062a\u0644\u0641\u0638", "\u0645\u062a\u0631\u0627\u062f\u0641", "\u0641\u0631\u0647\u0646\u06af \u0644\u063a\u062a",
@@ -437,6 +477,22 @@ WEAK_FORM_IPA = {
 
 
 # === SECTION 3: NETWORK, SENTENCE AUTO-CORRECTION & SANITIZATION UTILITIES ===
+_OFFLINE_ONLY = False  # Settings > Offline-only mode: no network request of any kind while set
+
+
+class OfflineModeError(requests.ConnectionError):
+    """smart_request refused a request because offline-only mode is on."""
+
+
+def set_offline_only(enabled: bool) -> None:
+    global _OFFLINE_ONLY
+    _OFFLINE_ONLY = bool(enabled)
+
+
+def is_offline_only() -> bool:
+    return _OFFLINE_ONLY
+
+
 def _send_request(method: str, url: str, **kwargs) -> requests.Response:
     """Unblocked hybrid request: tries normal pooled session first, then direct session."""
     kwargs.setdefault("timeout", 3.0)
@@ -581,7 +637,10 @@ def submit_in_context(pool: ThreadPoolExecutor, fn, *args, **kwargs):
 
 
 def smart_request(method: str, url: str, **kwargs) -> requests.Response:
-    """Network call used by everything: answered from the running lookup's cache when it has one."""
+    """Network call used by everything: answered from the running lookup's cache when it has one.
+    The single choke point for the network: offline-only mode stops every request here, cache or not."""
+    if _OFFLINE_ONLY:
+        raise OfflineModeError(f"Offline-only mode is on; not contacting {url}")
     cache = _LOOKUP_CACHE.get()
     if cache is None:
         return _send_request(method, url, **kwargs)
@@ -877,7 +936,7 @@ def analyze_morphology(term: str) -> Dict[str, Any]:
 # === SECTION 6: WIKIDATA / WIKIPEDIA INTERLANGUAGE LINKS & HYBRID TRANSLATOR ===
 def fetch_wikipedia_persian_interlanguage_title(term: str) -> str:
     clean = term.strip()
-    if not clean or len(clean.split()) > 4:
+    if _OFFLINE_ONLY or not clean or len(clean.split()) > 4:
         return ""
     try:
         r = smart_request(
@@ -947,6 +1006,8 @@ def substitute_idiom_in_sentence(sentence: str, idiom: str, meaning_en: str) -> 
 
 def _clients5(text: str, source: str, target: str) -> str:
     """Raw single-best translation from Google's dictionary-extension endpoint."""
+    if _OFFLINE_ONLY:
+        return ""
     try:
         r = smart_request(
             "GET",
@@ -985,15 +1046,15 @@ def translate_single_string(text: str, is_short: bool = False) -> str:
     if low in OFFLINE_LEXICON.get("words", {}):
         return OFFLINE_LEXICON["words"][low]
 
-    # 1. Primary: Google GTX Bilingual Dictionary & Translator
+    # 1. Primary: Google GTX Bilingual Dictionary & Translator (never in offline-only mode)
     try:
-        r = smart_request(
+        r = None if _OFFLINE_ONLY else smart_request(
             "GET",
             "https://translate.googleapis.com/translate_a/single",
             params=[("client", "gtx"), ("sl", "en"), ("tl", "fa"), ("dt", "t"), ("dt", "bd"), ("q", clean)],
             timeout=2.8,
         )
-        if r.ok:
+        if r is not None and r.ok:
             data = r.json()
             if is_short and len(data) > 1 and isinstance(data[1], list):
                 terms = []
@@ -1024,7 +1085,7 @@ def translate_single_string(text: str, is_short: bool = False) -> str:
         if syns:
             gloss = syns[0].definition().split(";")[0].strip()
             gloss = re.sub(r"^\([^)]+\)\s*", "", gloss)
-            tr_g = translate_via_clients5(gloss, is_short=False)
+            tr_g = translate_offline_backup(gloss) if _OFFLINE_ONLY else translate_via_clients5(gloss, is_short=False)
             if tr_g:
                 return normalize_persian(tr_g, is_short_term=True)
 
@@ -1108,7 +1169,7 @@ def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[s
         else:
             remaining_sentences.append(item)
 
-    if remaining_sentences:
+    if remaining_sentences and not _OFFLINE_ONLY:  # offline: each one goes to the local model below
         joined = "\n".join(remaining_sentences)
         try:
             r = smart_request(
@@ -1225,7 +1286,7 @@ def fetch_live_suggestions(prefix: str) -> List[str]:
     if is_persian_text(q):
         return []  # Datamuse is English-only; the app still offers matching history entries
     sources = _dictionary_sources()
-    datamuse = sources.REGISTRY.usable("datamuse", sources.LookupContext(term=q))
+    datamuse = sources.REGISTRY.usable("datamuse", sources.LookupContext(term=q, offline=_OFFLINE_ONLY))
     remote = datamuse.suggest(q) if datamuse else []
     return list(dict.fromkeys(user_keys + local_idioms + remote))[:7]
 
@@ -1270,7 +1331,7 @@ def fetch_verified_example_for_relation(word: str, target_pos: str = "") -> str:
             _log_failure(f"WordNet example lookup failed for {word!r}")
 
     sources = _dictionary_sources()
-    api = sources.REGISTRY.usable("dictionaryapi", sources.LookupContext(term=clean))
+    api = sources.REGISTRY.usable("dictionaryapi", sources.LookupContext(term=clean, offline=_OFFLINE_ONLY))
     if api:
         example = api.find_example(clean, target_pos)
         if example:
@@ -1337,6 +1398,8 @@ def reverse_lookup_local(fa: str) -> List[str]:
 
 def _google_fa_to_en(text: str) -> Tuple[str, List[Dict[str, str]]]:
     """(full translation, dictionary candidates grouped by part of speech) from Google's gtx endpoint."""
+    if _OFFLINE_ONLY:
+        return "", []
     try:
         r = smart_request(
             "GET",
@@ -1481,7 +1544,9 @@ def _analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, 
     root_lemma = morphology.get("root", clean)
 
     sources = _dictionary_sources()
-    ctx = sources.LookupContext(term=clean, is_idiom=is_idiom_or_phrase, deep_mode=deep_mode, root_lemma=root_lemma)
+    ctx = sources.LookupContext(
+        term=clean, is_idiom=is_idiom_or_phrase, deep_mode=deep_mode, root_lemma=root_lemma, offline=_OFFLINE_ONLY
+    )
     with ThreadPoolExecutor(max_workers=1) as pool:
         f_fa = submit_in_context(pool, fetch_persian_word_meaning, clean, is_idiom_or_phrase)
         merged = sources.REGISTRY.run(ctx)  # every enabled dictionary source, merged in registry order

@@ -65,6 +65,7 @@ class DatamuseFrequencySource(DictionarySource):
     above returns the headword itself, so this asks for it; it runs beside them, adding no wait."""
     name = "datamuse_frequency"
     label = "Datamuse word frequency"
+    part_of = "datamuse"  # the same site: the Datamuse toggle in Settings covers both
 
     def applies(self, ctx: LookupContext) -> bool:
         return not ctx.is_idiom and len(ctx.term.split()) == 1 and ctx.term.isalpha()

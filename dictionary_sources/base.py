@@ -46,6 +46,7 @@ class DictionarySource:
     label = ""                # human-readable name
     needs_network = True      # False for sources that only read bundled data
     needs: Tuple[str, ...] = ()  # sources (registered earlier) whose result fetch() wants as `prior`
+    part_of = ""              # another source's name: switched on and off with it, not listed on its own
 
     def applies(self, ctx: LookupContext) -> bool:
         """False when this kind of lookup (a phrase, a single word...) is none of this source's business."""
@@ -118,13 +119,17 @@ class SourceRegistry:
     def is_enabled(self, name: str) -> bool:
         return name not in self._disabled
 
+    def any_enabled(self) -> bool:
+        """False when the user has switched every source off (says nothing about offline-only mode)."""
+        return any(s.name not in self._disabled for s in self._sources if not s.part_of)
+
     def disabled_names(self) -> List[str]:
         return sorted(self._disabled)
 
     def usable(self, name: str, ctx: LookupContext) -> Optional[DictionarySource]:
         """The named source if it may be contacted for this lookup (enabled, online if it needs to be)."""
         source = self.get(name)
-        if name in self._disabled or (ctx.offline and source.needs_network):
+        if name in self._disabled or source.part_of in self._disabled or (ctx.offline and source.needs_network):
             return None
         return source
 

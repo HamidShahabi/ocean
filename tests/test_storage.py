@@ -27,7 +27,7 @@ class HistoryStoreTest(unittest.TestCase):
         with open(storage.__file__, encoding="utf-8") as f:
             self.assertNotIn("PyQt", f.read())
 
-    def test_schema_has_the_original_columns_plus_lookup_count(self):
+    def test_schema_has_the_original_columns_plus_later_ones(self):
         conn = sqlite3.connect(self.db_path)
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(lexicon)")]
@@ -36,6 +36,8 @@ class HistoryStoreTest(unittest.TestCase):
             conn.close()
         self.assertEqual(cols[:6], ["id", "query_key", "display_term", "payload", "is_favorite", "updated_at"])
         self.assertIn("lookup_count", cols)
+        self.assertIn("produced_at", cols)
+        self.assertIn("engine_version", cols)
         self.assertEqual(mode, "wal")
 
     def test_save_then_get_normalises_the_key(self):
@@ -101,6 +103,14 @@ class HistoryStoreTest(unittest.TestCase):
                                          "lookup_count": 1})
         self.assertFalse(everything[1]["is_favorite"])
         self.assertEqual([e["query_key"] for e in self.store.list_entries(favorites_only=True)], ["new", "old"])
+
+    def test_favorite_entries_returns_saved_payloads_only(self):
+        self.store.save_entry("book", {"headword": "book", "persian_equivalent": "کتاب"})
+        self.store.save_entry("tree", {"headword": "tree"})
+        self.store.toggle_favorite("book")
+        self.assertEqual(self.store.favorite_entries(), [
+            {"query_key": "book", "display_term": "book", "payload": {"headword": "book", "persian_equivalent": "کتاب"}},
+        ])
 
     def test_english_entries_with_persian_matches_any_part(self):
         self.store.save_entry("ephemeral", {"headword": "ephemeral", "persian_equivalent": f"{PASSING}، {FLEETING}"})
@@ -201,7 +211,7 @@ class HistorySearchAndSortTest(unittest.TestCase):
         self.assertEqual(cols.count("lookup_count"), 1)
 
     def test_migration_coexists_with_other_added_columns(self):
-        self._sql("ALTER TABLE lexicon ADD COLUMN produced_at TEXT")
+        self._sql("ALTER TABLE lexicon ADD COLUMN some_future_column TEXT")
         self.store.save_entry("sea", {"headword": "sea"})
         reopened = storage.HistoryStore(self.db_path)
         self.assertEqual(reopened.list_entries()[0]["lookup_count"], 1)
