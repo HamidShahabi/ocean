@@ -35,7 +35,12 @@ if [ "${1:-}" = "--remove" ]; then
     exit 0
 fi
 
-gsettings set "$SCHEMA.custom-keybinding:$KEY_PATH" name "Ocean: look up selection"
-gsettings set "$SCHEMA.custom-keybinding:$KEY_PATH" command "'$PWD/run.sh' --lookup"
-gsettings set "$SCHEMA.custom-keybinding:$KEY_PATH" binding "$BINDING"
+# gsettings parses values as GVariant text, so each string must be a quoted GVariant literal
+# (a bare "'/path/run.sh' --lookup" fails with "expected end of input").
+gvariant_str() { python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$1"; }
+command_line="$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]) + " --lookup")' "$PWD/run.sh")"
+
+gsettings set "$SCHEMA.custom-keybinding:$KEY_PATH" name "$(gvariant_str "Ocean: look up selection")"
+gsettings set "$SCHEMA.custom-keybinding:$KEY_PATH" command "$(gvariant_str "$command_line")"
+gsettings set "$SCHEMA.custom-keybinding:$KEY_PATH" binding "$(gvariant_str "$BINDING")"
 echo "Shortcut $BINDING -> Ocean lookup installed. Select or copy text anywhere, then press it."
