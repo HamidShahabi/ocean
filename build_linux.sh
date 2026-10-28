@@ -23,7 +23,7 @@ done
     --hidden-import=lexical_engine --hidden-import=bs4 --hidden-import=lxml --hidden-import=nltk \
     "${collect[@]}" --name Ocean app.py
 
-# Data files live next to the executable (app.get_base_dir / lexical_engine._get_engine_base_dir look there).
+# Data files live next to the executable (ui.config.get_base_dir / lexical_engine._get_engine_base_dir look there).
 # User data (history, memory, settings) lives in ~/.local/share/Ocean, not in the build.
 for f in offline_lexicon.json ocean_offline_core.db \
          kokoro-v1.0.onnx voices-v1.0.bin; do
