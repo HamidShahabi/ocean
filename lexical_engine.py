@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Tuple
 import requests
 from requests.adapters import HTTPAdapter
-from bs4 import BeautifulSoup
 
 
 def _get_engine_base_dir() -> str:
@@ -1064,35 +1063,10 @@ def extract_sentence_key_terms(sentence: str) -> List[Dict[str, str]]:
     return extracted[:5]
 
 
-def fetch_tatoeba_open_corpus(term: str) -> List[Dict[str, str]]:
-    pairs: List[Dict[str, str]] = []
-    clean = term.strip()
-    try:
-        r = smart_request(
-            "GET",
-            "https://tatoeba.org/en/api_v0/search",
-            params={"from": "eng", "to": "pes", "query": clean},
-            timeout=2.6,
-        )
-        if r.ok:
-            results = r.json().get("results", [])
-            for item in results[:5]:
-                en_txt = clean_english_sentence(item.get("text", ""))
-                if not en_txt or not sentence_contains_target(en_txt, clean) or not (5 <= len(en_txt.split()) <= 20):
-                    continue
-                fa_txt = ""
-                for tr_group in item.get("translations", []):
-                    for tr in tr_group:
-                        if tr.get("lang") == "pes" and tr.get("text"):
-                            fa_txt = normalize_persian(tr["text"])
-                            break
-                    if fa_txt:
-                        break
-                if en_txt and fa_txt:
-                    pairs.append({"en": en_txt, "fa": fa_txt})
-    except Exception:
-        _log_failure(f"Tatoeba lookup failed for {term!r}")
-    return pairs[:3]
+def _dictionary_sources():
+    """The dictionary_sources package (imported lazily: its modules import this one for the text helpers)."""
+    import dictionary_sources
+    return dictionary_sources
 
 
 def fetch_live_suggestions(prefix: str) -> List[str]:
@@ -1103,313 +1077,10 @@ def fetch_live_suggestions(prefix: str) -> List[str]:
     local_idioms = [k for k in OFFLINE_LEXICON.get("idioms", {}) if k.startswith(q.lower())]
     if is_persian_text(q):
         return []  # Datamuse is English-only; the app still offers matching history entries
-    try:
-        r = smart_request("GET", "https://api.datamuse.com/sug", params={"s": q, "max": 7}, timeout=1.2)
-        if r.ok:
-            remote = [item["word"] for item in r.json() if item.get("word")]
-            return list(dict.fromkeys(user_keys + local_idioms + remote))[:7]
-    except Exception:
-        _log_failure(f"Datamuse suggestions failed for {prefix!r}")
-    return list(dict.fromkeys(user_keys + local_idioms))[:7]
-
-
-def fetch_cambridge_us(term: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"ipa_us": "", "senses": [], "syns": []}
-    slug = "-".join(term.strip().lower().split())
-    try:
-        url = f"https://dictionary.cambridge.org/us/dictionary/english/{slug}"
-        r = smart_request("GET", url, timeout=3.0)
-        if not r.ok:
-            return out
-        soup = BeautifulSoup(r.text, "lxml")
-
-        hw_el = soup.select_one(".hw.dhw")
-        hw_txt = hw_el.get_text(strip=True).lower() if hw_el else ""
-        us_span = soup.select_one(".us.dpron-i .ipa, .dpron-i .ipa")
-        if us_span and (not hw_txt or hw_txt == term.strip().lower()):
-            ipa_txt = us_span.get_text("", strip=True)
-            if ipa_txt:
-                out["ipa_us"] = clean_ipa_display(ipa_txt)
-
-        entry_blocks = soup.select(".pr.entry-body__el") or [soup]
-        for eb in entry_blocks[:4]:
-            pos_el = eb.select_one(".pos.dpos")
-            eb_pos = pos_el.get_text(strip=True).capitalize() if pos_el else "Entry"
-
-            for block in eb.select(".def-block.ddef_block")[:3]:
-                def_el = block.select_one(".def.ddef_d.db")
-                if not def_el:
-                    continue
-                d_text = re.sub(r"\s+([.,!?;:])", r"\1", re.sub(r"\s+", " ", def_el.get_text(" ", strip=True).rstrip(":"))).strip()
-                if not d_text or len(d_text.split()) < 2 or d_text.lower().startswith("when you "):
-                    continue
-                if "in a pub" in d_text.lower():
-                    continue
-                if not d_text.endswith("."):
-                    d_text += "."
-                d_text = d_text[0].upper() + d_text[1:]
-
-                example_sent = ""
-                for ex_el in block.select(".examp.dexamp .eg.deg"):
-                    cand = clean_english_sentence(ex_el.get_text(" ", strip=True))
-                    if cand and len(cand.split()) >= 4 and sentence_contains_target(cand, term):
-                        example_sent = cand
-                        break
-
-                out["senses"].append({
-                    "pos": eb_pos,
-                    "def": d_text,
-                    "example_en": example_sent,
-                })
-
-            for syn_el in eb.select(".synonym .lcm, .thesaurus .lcm")[:4]:
-                s_txt = syn_el.get_text(" ", strip=True).strip()
-                if s_txt and s_txt.lower() != term.strip().lower() and s_txt.lower() not in WEAK_SYNONYMS:
-                    out["syns"].append(s_txt)
-    except Exception:
-        _log_failure(f"Cambridge lookup failed for {term!r}")
-    return out
-
-
-def fetch_longman_ldoce(term: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"ipa_us": "", "senses": [], "collocations": []}
-    slug = "-".join(term.strip().lower().split())
-    try:
-        url = f"https://www.ldoceonline.com/dictionary/{slug}"
-        r = smart_request("GET", url, timeout=3.0)
-        if not r.ok:
-            return out
-        soup = BeautifulSoup(r.text, "lxml")
-
-        hwd_el = soup.select_one(".HWD")
-        hwd_txt = hwd_el.get_text(strip=True).lower() if hwd_el else ""
-        pron = soup.select_one(".PRON")
-        if pron and (not hwd_txt or hwd_txt == term.strip().lower()):
-            p_txt = pron.get_text(strip=True)
-            if p_txt:
-                out["ipa_us"] = clean_ipa_display(p_txt)
-
-        pos_el = soup.select_one(".POS")
-        default_pos = pos_el.get_text(strip=True).capitalize() if pos_el else "Entry"
-
-        for sense in soup.select(".Sense")[:5]:
-            s_pos_el = sense.select_one(".POS")
-            s_pos = s_pos_el.get_text(strip=True).capitalize() if s_pos_el else default_pos
-            d_el = sense.select_one(".DEF")
-            if not d_el:
-                continue
-            d_txt = re.sub(r"\s+([.,!?;:])", r"\1", re.sub(r"\s+", " ", d_el.get_text(" ", strip=True))).strip()
-            if not d_txt or len(d_txt.split()) < 2 or d_txt.lower().startswith("when you "):
-                continue
-            if not d_txt.endswith("."):
-                d_txt += "."
-            d_txt = d_txt[0].upper() + d_txt[1:]
-
-            ex_sent = ""
-            for ex_el in sense.select(".EXAMPLE"):
-                cand = clean_english_sentence(ex_el.get_text(" ", strip=True))
-                if cand and len(cand.split()) >= 4 and sentence_contains_target(cand, term):
-                    ex_sent = cand
-                    break
-
-            out["senses"].append({"pos": s_pos, "def": d_txt, "example_en": ex_sent})
-
-        for col_box in soup.select(".ColloBox, .Collocate")[:5]:
-            col_term_el = col_box.select_one(".COLLOC, .collo")
-            col_ex_el = col_box.select_one(".EXAMPLE")
-            if col_term_el:
-                c_term = re.sub(r"\s+", " ", col_term_el.get_text(" ", strip=True)).strip()
-                c_ex = clean_english_sentence(col_ex_el.get_text(" ", strip=True)) if col_ex_el else ""
-                if c_term and len(c_term) > 3 and c_ex:
-                    out["collocations"].append({"term": c_term, "example_en": c_ex})
-    except Exception:
-        _log_failure(f"Longman lookup failed for {term!r}")
-    return out
-
-
-def fetch_idiom_and_web_fallback(term: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"senses": []}
-    clean = term.strip()
-    low = clean.lower()
-    words = clean.split()
-
-    if low in OFFLINE_LEXICON.get("idioms", {}):
-        entry = OFFLINE_LEXICON["idioms"][low]
-        out["senses"].append({
-            "pos": "Idiom / Expression",
-            "def": entry["def"],
-            "example_en": entry["example"],
-        })
-
-    try:
-        slug = "+".join(low.split())
-        r = smart_request("GET", f"https://idioms.thefreedictionary.com/{slug}", timeout=2.8)
-        if r.ok:
-            soup = BeautifulSoup(r.text, "lxml")
-            for ds in soup.select("#Definition section .ds-list, #Definition section .ds-single")[:4]:
-                ex_texts = []
-                for ill in ds.select(".illustration"):
-                    cand = clean_english_sentence(ill.get_text(" ", strip=True))
-                    if cand and len(cand.split()) >= 4 and sentence_contains_target(cand, clean):
-                        ex_texts.append(cand)
-                    ill.decompose()
-
-                raw_def = ds.get_text(" ", strip=True)
-                raw_def = re.sub(r"^[0-9a-zA-Z]+\.\s*", "", raw_def)
-                raw_def = re.sub(r"\s+", " ", raw_def).strip()
-                if raw_def and len(raw_def.split()) >= 2:
-                    if not raw_def.endswith("."):
-                        raw_def += "."
-                    raw_def = raw_def[0].upper() + raw_def[1:]
-                    out["senses"].append({
-                        "pos": "Idiom / Expression",
-                        "def": raw_def,
-                        "example_en": ex_texts[0] if ex_texts else "",
-                    })
-    except Exception:
-        _log_failure(f"TheFreeDictionary idiom lookup failed for {term!r}")
-
-    if len(out["senses"]) < 2:
-        try:
-            wk_slug = "_".join(clean.split())
-            r_wk = smart_request("GET", f"https://en.wiktionary.org/api/rest_v1/page/definition/{requests.utils.quote(wk_slug)}", timeout=2.5)
-            if r_wk.ok:
-                en_blocks = r_wk.json().get("en", [])
-                for b in en_blocks[:2]:
-                    pos = b.get("partOfSpeech", "Expression").capitalize()
-                    for df in b.get("definitions", [])[:2]:
-                        raw_d = BeautifulSoup(df.get("definition", ""), "lxml").get_text(" ", strip=True)
-                        if raw_d and len(raw_d.split()) >= 2:
-                            exs = df.get("examples", [])
-                            ex_s = BeautifulSoup(exs[0], "lxml").get_text(" ", strip=True) if exs else ""
-                            out["senses"].append({
-                                "pos": pos,
-                                "def": clean_english_sentence(raw_d),
-                                "example_en": clean_english_sentence(ex_s) if ex_s else "",
-                            })
-        except Exception:
-            _log_failure(f"Wiktionary lookup failed for {term!r}")
-
-    if not out["senses"] and len(words) >= 2:
-        linking_verbs = {"get": "To become", "become": "To become", "grow": "To gradually become", "turn": "To turn or become", "feel": "To feel", "go": "To become"}
-        first_w = words[0].lower()
-        last_w = words[-1].lower()
-        if first_w in linking_verbs and wn:
-            syns = wn.synsets(last_w)
-            if syns:
-                head_def = syns[0].definition()
-                comp_def = f"{linking_verbs[first_w]} {head_def}."
-                comp_ex = f"Things started to {low} when the plan fell apart."
-                out["senses"].append({
-                    "pos": "Colloquial Phrase",
-                    "def": comp_def[0].upper() + comp_def[1:],
-                    "example_en": comp_ex,
-                })
-
-    return out
-
-
-def fetch_oxford_and_relations(term: str, is_idiom: bool, root_lemma: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"ipa_us": "", "senses": [], "syns": [], "ants": [], "colls": [], "primary_pos": ""}
-    clean = term.strip()
-    low = clean.lower()
-    words = clean.split()
-
-    if low in CURATED_SYNONYMS_MAP:
-        out["syns"].extend(CURATED_SYNONYMS_MAP[low])
-    if low in OFFLINE_LEXICON.get("idioms", {}):
-        out["syns"].extend(OFFLINE_LEXICON["idioms"][low].get("syns", []))
-
-    try:
-        r = smart_request("GET", f"https://api.dictionaryapi.dev/api/v2/entries/en/{clean}", timeout=2.5)
-        if r.ok:
-            data = r.json()
-            if isinstance(data, list) and data:
-                for entry in data[:2]:
-                    for p in entry.get("phonetics", []):
-                        if p.get("text") and ("-us" in p.get("audio", "") or not out["ipa_us"]):
-                            out["ipa_us"] = clean_ipa_display(p["text"])
-                    for m in entry.get("meanings", []):
-                        pos = m.get("partOfSpeech", "Entry").capitalize()
-                        if not out["primary_pos"]:
-                            out["primary_pos"] = pos
-                        for s in m.get("synonyms", [])[:4]:
-                            if not is_spelling_or_root_duplicate(s, clean, root_lemma) and s.lower() not in WEAK_SYNONYMS and len(s) > 2:
-                                out["syns"].append(s)
-                        for a in m.get("antonyms", [])[:4]:
-                            if not is_spelling_or_root_duplicate(a, clean, root_lemma) and len(a) > 2:
-                                out["ants"].append(a)
-                        for d in m.get("definitions", [])[:2]:
-                            d_txt = clean_english_sentence(d.get("definition", ""))
-                            ex_txt = clean_english_sentence(d.get("example", ""))
-                            if ex_txt and not sentence_contains_target(ex_txt, clean):
-                                ex_txt = ""
-                            if d_txt and len(d_txt.split()) >= 2:
-                                out["senses"].append({"pos": pos, "def": d_txt, "example_en": ex_txt})
-    except Exception:
-        _log_failure(f"dictionaryapi.dev lookup failed for {term!r}")
-
-    if wn and not is_idiom:
-        try:
-            pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
-            for syn in wn.synsets("_".join(words))[:4]:
-                pos = pos_map.get(syn.pos(), "Entry")
-                if not out["primary_pos"]:
-                    out["primary_pos"] = pos
-                d_txt = clean_english_sentence(syn.definition())
-                ex_txt = ""
-                for ex in syn.examples():
-                    if sentence_contains_target(ex, clean):
-                        ex_txt = clean_english_sentence(ex)
-                        break
-                if d_txt:
-                    out["senses"].append({"pos": pos, "def": d_txt, "example_en": ex_txt})
-                for lem in syn.lemmas():
-                    w_name = lem.name().replace("_", " ")
-                    if not is_spelling_or_root_duplicate(w_name, clean, root_lemma) and w_name.lower() not in WEAK_SYNONYMS:
-                        out["syns"].append(w_name)
-                    for ant in lem.antonyms():
-                        ant_name = ant.name().replace("_", " ")
-                        if not is_spelling_or_root_duplicate(ant_name, clean, root_lemma):
-                            out["ants"].append(ant_name)
-        except Exception:
-            _log_failure(f"WordNet relations failed for {term!r}")
-
-    if not is_idiom:
-        try:
-            r_syn = smart_request("GET", "https://api.datamuse.com/words", params={"rel_syn": clean, "md": "fp", "max": 6}, timeout=2.0)
-            if r_syn.ok:
-                for item in r_syn.json():
-                    w = item.get("word", "").strip()
-                    if w and not is_spelling_or_root_duplicate(w, clean, root_lemma) and w.lower() not in WEAK_SYNONYMS and len(w) > 2:
-                        out["syns"].append(w)
-
-            r_ant = smart_request("GET", "https://api.datamuse.com/words", params={"rel_ant": clean, "md": "fp", "max": 6}, timeout=2.0)
-            if r_ant.ok:
-                for item in r_ant.json():
-                    w = item.get("word", "").strip()
-                    if w and not is_spelling_or_root_duplicate(w, clean, root_lemma) and len(w) > 2:
-                        out["ants"].append(w)
-
-            if len(words) == 1:
-                if out["primary_pos"] == "Adjective":
-                    r_col = smart_request("GET", "https://api.datamuse.com/words", params={"rel_jja": clean, "md": "f", "max": 6}, timeout=2.0)
-                    if r_col.ok:
-                        for item in r_col.json():
-                            noun = item.get("word", "").lower()
-                            if noun and noun not in STOPWORDS and len(noun) > 2 and noun.isalpha():
-                                out["colls"].append(f"{low} {noun}")
-                elif out["primary_pos"] == "Noun":
-                    r_col = smart_request("GET", "https://api.datamuse.com/words", params={"rel_jjb": clean, "md": "f", "max": 6}, timeout=2.0)
-                    if r_col.ok:
-                        for item in r_col.json():
-                            adj = item.get("word", "").lower()
-                            if adj and adj not in STOPWORDS and len(adj) > 3 and adj.isalpha():
-                                out["colls"].append(f"{adj} {low}")
-        except Exception:
-            _log_failure(f"Datamuse relations failed for {term!r}")
-
-    return out
+    sources = _dictionary_sources()
+    datamuse = sources.REGISTRY.usable("datamuse", sources.LookupContext(term=q))
+    remote = datamuse.suggest(q) if datamuse else []
+    return list(dict.fromkeys(user_keys + local_idioms + remote))[:7]
 
 
 def generate_pos_matched_example(term: str, pos: str) -> str:
@@ -1451,20 +1122,12 @@ def fetch_verified_example_for_relation(word: str, target_pos: str = "") -> str:
         except Exception:
             _log_failure(f"WordNet example lookup failed for {word!r}")
 
-    try:
-        r = smart_request("GET", f"https://api.dictionaryapi.dev/api/v2/entries/en/{clean}", timeout=1.8)
-        if r.ok:
-            for entry in r.json()[:2]:
-                for m in entry.get("meanings", []):
-                    m_pos = m.get("partOfSpeech", "").capitalize()
-                    if target_pos and m_pos and m_pos != target_pos:
-                        continue
-                    for d in m.get("definitions", []):
-                        ex = d.get("example", "")
-                        if ex and sentence_contains_target(ex, clean) and len(ex.split()) >= 5:
-                            return clean_english_sentence(ex)
-    except Exception:
-        _log_failure(f"dictionaryapi.dev example lookup failed for {word!r}")
+    sources = _dictionary_sources()
+    api = sources.REGISTRY.usable("dictionaryapi", sources.LookupContext(term=clean))
+    if api:
+        example = api.find_example(clean, target_pos)
+        if example:
+            return example
 
     return generate_pos_matched_example(clean, target_pos or "Noun")
 
@@ -1653,28 +1316,20 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
     }
     root_lemma = morphology.get("root", clean)
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        f_cam = pool.submit(fetch_cambridge_us, clean)
-        f_ldo = pool.submit(fetch_longman_ldoce, clean)
-        f_id = pool.submit(fetch_idiom_and_web_fallback, clean) if (is_idiom_or_phrase or deep_mode) else None
-        f_tat = pool.submit(fetch_tatoeba_open_corpus, clean)
-        f_ox = pool.submit(fetch_oxford_and_relations, clean, is_idiom_or_phrase, root_lemma)
+    sources = _dictionary_sources()
+    ctx = sources.LookupContext(term=clean, is_idiom=is_idiom_or_phrase, deep_mode=deep_mode, root_lemma=root_lemma)
+    with ThreadPoolExecutor(max_workers=1) as pool:
         f_fa = pool.submit(fetch_persian_word_meaning, clean, is_idiom_or_phrase)
-
-        cam = f_cam.result()
-        ldo = f_ldo.result()
-        idiom_data = f_id.result() if f_id else {"senses": []}
-        tatoeba_pairs = f_tat.result()
-        ox = f_ox.result()
+        merged = sources.REGISTRY.run(ctx)  # every enabled dictionary source, merged in registry order
         fa_main = f_fa.result()
 
     did_you_mean = ""
-    if not cam["senses"] and not ldo["senses"] and not ox["senses"] and not idiom_data["senses"] and len(words) == 1:
+    if not merged.senses and len(words) == 1:
         sugs = fetch_live_suggestions(clean)
         if sugs and sugs[0].lower() != low:
             did_you_mean = sugs[0]
 
-    ipa_us = cam["ipa_us"] or ldo["ipa_us"] or ox["ipa_us"] or to_ipa_us(clean)
+    ipa_us = merged.ipa_us or to_ipa_us(clean)
 
     priority_senses: List[Dict[str, str]] = []
     if low in USER_MEMORY.get("entries", {}):
@@ -1689,7 +1344,7 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
     if low in OFFLINE_LEXICON.get("curated_senses", {}):
         priority_senses.extend(OFFLINE_LEXICON["curated_senses"][low])
 
-    all_raw_senses = priority_senses + idiom_data["senses"] + cam["senses"] + ldo["senses"] + ox["senses"]
+    all_raw_senses = priority_senses + merged.senses
 
     used_examples = set()
     selected_senses: List[Dict[str, str]] = []
@@ -1707,8 +1362,8 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
             ex_en = ""
             ex_fa_preset = ""
 
-        if not ex_en and tatoeba_pairs:
-            for tp in tatoeba_pairs:
+        if not ex_en and merged.examples:
+            for tp in merged.examples:
                 if tp["en"].lower() not in used_examples:
                     ex_en = tp["en"]
                     ex_fa_preset = tp["fa"]
@@ -1749,7 +1404,7 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
     colls_raw: List[Dict[str, str]] = []
     if not is_idiom_or_phrase:
         seen_col = set()
-        for c in ldo["collocations"] + query_offline_bnc_collocations(clean):
+        for c in merged.collocations + query_offline_bnc_collocations(clean):
             t = c["term"].strip()
             if t.lower() not in seen_col and t.lower() != low:
                 seen_col.add(t.lower())
@@ -1760,7 +1415,7 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
             "Everyone noticed the {0} right away.",
             "Having a {0} made a significant difference.",
         ]
-        for p in ox["colls"]:
+        for p in merged.collocation_terms:
             if len(colls_raw) >= 3:
                 break
             if p.lower() not in seen_col:
@@ -1770,11 +1425,11 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
         colls_raw = colls_raw[:3]
 
     syns_words = [
-        w for w in dict.fromkeys(cam["syns"] + ox["syns"])
+        w for w in dict.fromkeys(merged.syns)
         if not is_spelling_or_root_duplicate(w, clean, root_lemma) and w.lower() not in WEAK_SYNONYMS
     ][:3]
     ants_words = [
-        w for w in dict.fromkeys(ox["ants"])
+        w for w in dict.fromkeys(merged.ants)
         if not is_spelling_or_root_duplicate(w, clean, root_lemma) and w.lower() not in WEAK_SYNONYMS
     ][:3]
 

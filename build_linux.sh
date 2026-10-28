@@ -12,7 +12,7 @@ for f in lexicon_vault.db user_memory.json; do
     fi
 done
 
-uv pip install --python .venv/bin/python pyinstaller
+uv pip install --python .venv/bin/python -r requirements.lock   # includes the pinned pyinstaller
 
 collect=()
 for pkg in kokoro_onnx espeakng_loader phonemizer segments language_tags eng_to_ipa ctranslate2 sentencepiece; do
@@ -20,7 +20,7 @@ for pkg in kokoro_onnx espeakng_loader phonemizer segments language_tags eng_to_
 done
 
 .venv/bin/pyinstaller --noconfirm --windowed --onedir --paths=. \
-    --hidden-import=lexical_engine --hidden-import=bs4 --hidden-import=lxml --hidden-import=nltk \
+    --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=bs4 --hidden-import=lxml --hidden-import=nltk \
     "${collect[@]}" --name Ocean app.py
 
 # Data files live next to the executable (ui.config.get_base_dir / lexical_engine._get_engine_base_dir look there).
