@@ -117,6 +117,8 @@ class SettingsPage(QWidget):
         parent_layout.addWidget(hint)
         self.source_checks: Dict[str, QCheckBox] = {}
         for source in REGISTRY.all():
+            if source.part_of:
+                continue  # follows its parent's toggle
             text = source.label if source.needs_network else f"{source.label} (bundled)"
             box = QCheckBox(text)
             box.setChecked(REGISTRY.is_enabled(source.name))

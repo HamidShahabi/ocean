@@ -17,6 +17,8 @@ from typing import Dict, Any, Iterator, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
 
+import word_levels
+
 
 def _get_engine_base_dir() -> str:
     if getattr(sys, "frozen", False):
@@ -94,6 +96,7 @@ ENGINE_VERSION = 1
 
 USER_MEMORY_FILE = user_data_path("user_memory.json")
 OFFLINE_LEXICON_FILE = os.path.join(ENGINE_BASE_DIR, "offline_lexicon.json")
+CEFR_LEVELS_FILE = os.path.join(ENGINE_BASE_DIR, "cefr_levels.json")
 OFFLINE_CORE_DB = os.path.join(ENGINE_BASE_DIR, "ocean_offline_core.db")
 OFFLINE_MT_DIR = os.path.join(ENGINE_BASE_DIR, "offline_mt_model")
 
@@ -1478,6 +1481,18 @@ def analyze_persian(raw: str) -> Dict[str, Any]:
     }
 
 
+def lookup_cefr_level(term: str) -> str:
+    """CEFR level of a word or phrase from the bundled list, '' if unlisted. An inflected form that is
+    not listed itself ('running', 'mice') takes its WordNet lemma's level."""
+    lemmas: List[str] = []
+    if LEMMATIZER and term.isalpha():
+        try:
+            lemmas = [LEMMATIZER.lemmatize(term.lower(), pos=p) for p in ("n", "v", "a", "r")]
+        except LookupError:  # the WordNet data is not installed: the exact word is all we can try
+            _log_failure(f"WordNet lemmatizer unavailable for the level of {term!r}")
+    return word_levels.cefr_level(CEFR_LEVELS_FILE, term, lemmas) or ""
+
+
 def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, Any]:
     with lookup_request_cache():  # identical requests within this one lookup reach the network once
         return _analyze_with_dictionaries(term, deep_mode)
@@ -1735,6 +1750,9 @@ def _analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, 
             for c in colls_raw
         ],
         "morphology": morphology,
+        "cefr_level": lookup_cefr_level(clean),
+        "frequency_per_million": merged.frequency,
+        "frequency_band": word_levels.frequency_band(merged.frequency),
         "synonyms": [
             {
                 "term": syn["term"],

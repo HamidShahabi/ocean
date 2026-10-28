@@ -124,6 +124,30 @@ OFFLINE MODE
   notice. Expect fewer examples and synonyms, and lower-quality Persian for
   words that are not in the bundled lexicon. The choice is remembered.
 
+WORD LEVEL AND FREQUENCY BADGES
+  English results show two small badges under the headword. The level badge
+  (A1-C2, CEFR) appears when the word is in the bundled word list; it works
+  offline, and an inflected form such as "running" takes the level of its base
+  form ("run"). The frequency badge (Very common / Common / Uncommon / Rare)
+  needs internet: it comes from Datamuse, which reports how often the word
+  occurs per million words (Very common: 100 or more, Common: 10-99,
+  Uncommon: 1-9, Rare: under 1). Hover a badge for the details. Learn the A1-B1
+  words first; the higher levels and rare words can wait.
+
+  The word list is cefr_levels.json (next to offline_lexicon.json in builds):
+    A1-B2: The CEFR-J Wordlist Version 1.5. Compiled by Yukio Tono, Tokyo
+      University of Foreign Studies. Retrieved from
+      http://www.cefr-j.org/download.html on 1/20/2020 (distributed in
+      github.com/openlanguageprofiles/olp-en-cefrj). Free for research and
+      commercial use provided the dataset is cited; copyright Tono Laboratory,
+      Tokyo University of Foreign Studies, no warranty.
+    C1-C2: Octanove Vocabulary Profile C1/C2 version 1.0 by Octanove Labs
+      (same repository), licensed CC BY-SA 4.0
+      (https://creativecommons.org/licenses/by-sa/4.0/). The C1/C2 words in
+      cefr_levels.json are redistributed under that licence.
+  Words listed at several levels (one per part of speech) show their lowest.
+  tools/build_cefr_levels.py regenerates the file from the two CSVs.
+
 DEVELOPMENT
   Run the tests:  .venv/bin/python -m unittest discover -s tests
 
