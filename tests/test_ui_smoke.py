@@ -37,6 +37,9 @@ WORD = {
                    "family": [{"word": "serendipitous", "pos": "adj"}]},
     "synonyms": [{"term": "luck", "fa": "شانس"}],
     "antonyms": [{"term": "misfortune", "fa": "بدشانسی"}],
+    "cefr_level": "C2",
+    "frequency_per_million": 0.4,
+    "frequency_band": "Rare",
 }
 SENTENCE = {
     "headword": "She found the book by pure chance yesterday",
@@ -117,6 +120,25 @@ class UiSmokeTest(unittest.TestCase):
         for payload in (WORD, SENTENCE, REVERSE, IDIOM):
             self.win.results_page.render(payload["headword"], payload)
             self.assertTrue(any(payload["headword"] in t for t in card_texts(self.win)), payload["headword"])
+
+    def test_level_and_frequency_badges_show_only_what_is_known(self):
+        def badges():  # walks the layout: cleared cards linger as children until the event loop deletes them
+            layout = self.win.results_page.cards_layout
+            cards = [layout.itemAt(i).widget() for i in range(layout.count())]
+            return {lbl.objectName(): lbl for c in cards if c is not None for lbl in c.findChildren(QLabel)
+                    if lbl.objectName() in ("LevelBadge", "FrequencyBadge")}
+
+        self.win.results_page.render("serendipity", WORD)
+        shown = badges()
+        self.assertEqual(shown["LevelBadge"].text(), "C2")
+        self.assertEqual(shown["FrequencyBadge"].text(), "Rare")
+        self.assertIn("0.4 occurrences per million", shown["FrequencyBadge"].toolTip())
+        self.win.results_page.render("serendipity", dict(WORD, cefr_level=""))
+        self.assertEqual(list(badges()), ["FrequencyBadge"])
+        self.win.results_page.render("serendipity", dict(WORD, frequency_band="", frequency_per_million=None))
+        self.assertEqual(list(badges()), ["LevelBadge"])
+        self.win.results_page.render("break the ice", IDIOM)
+        self.assertEqual(badges(), {})
 
     def test_lookup_of_a_saved_entry_shows_the_results_page(self):
         self.win._analyze_input(override_term="serendipity")
@@ -273,10 +295,11 @@ class UiSmokeTest(unittest.TestCase):
     def test_settings_lists_every_source_and_applies_the_toggles(self):
         registry = dictionary_sources.REGISTRY
         page = self.win.right_drawer.settings_page
-        self.assertEqual(list(page.source_checks), registry.names())
+        self.assertEqual(list(page.source_checks), [s.name for s in registry.all() if not s.part_of])
         self.assertTrue(all(box.isChecked() for box in page.source_checks.values()))
         for source in registry.all():
-            self.assertIn(source.label, page.source_checks[source.name].text())
+            if not source.part_of:
+                self.assertIn(source.label, page.source_checks[source.name].text())
         page.source_checks["cambridge"].setChecked(False)
         page.source_checks["wordnet"].setChecked(False)
         with mock.patch.object(self.win.settings, "save") as save:

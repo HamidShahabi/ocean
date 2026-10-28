@@ -9,7 +9,7 @@ tests). The per-lookup request cache is not here: it sits in lexical_engine.smar
 """
 from .base import DictionarySource, LookupContext, PartialEntry, SourceRegistry, merge_entries
 from .cambridge import CambridgeSource
-from .datamuse import DatamuseSource
+from .datamuse import DatamuseFrequencySource, DatamuseSource
 from .dictionaryapi import DictionaryApiSource
 from .longman import LongmanSource
 from .offline import CuratedSynonymsSource, IdiomFallbackSource, OfflineIdiomsSource
@@ -32,6 +32,7 @@ for _source in (
     DictionaryApiSource(),
     WordNetSource(),
     DatamuseSource(),
+    DatamuseFrequencySource(),
     TatoebaSource(),
 ):
     REGISTRY.register(_source)
