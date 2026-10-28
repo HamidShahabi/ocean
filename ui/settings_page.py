@@ -5,6 +5,8 @@ from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QCheckBox, QFormLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+import lexical_engine
+
 from dictionary_sources import REGISTRY
 
 from storage import DEFAULT_REFRESH_PERIOD, REFRESH_PERIOD_DAYS
@@ -59,6 +61,14 @@ class SettingsPage(QWidget):
         form.addRow("Refresh Saved Entries:", self.refresh_drop)
 
         s_lay.addLayout(form)
+
+        self.offline_check = QCheckBox("Offline-only mode (no network requests at all)")
+        self.offline_check.setToolTip(
+            "Use only your history, Ocean's bundled lexicon, your own entries and the offline "
+            "translator and voice. Nothing is sent over the network."
+        )
+        self.offline_check.setChecked(bool(self.main_win.settings.data.get("offline_only", False)))
+        s_lay.addWidget(self.offline_check)
 
         self.test_voice_btn = QPushButton("  Test Voice")
         self.test_voice_btn.setObjectName("GlassPillButton")
@@ -115,6 +125,7 @@ class SettingsPage(QWidget):
 
     def on_show(self) -> None:
         self.theme_drop.setCurrentText(self.main_win.settings.data.get("theme", "Dark Mode"))
+        self.offline_check.setChecked(bool(self.main_win.settings.data.get("offline_only", False)))
         for name, box in self.source_checks.items():  # discard unsaved ticks from an earlier visit
             box.setChecked(REGISTRY.is_enabled(name))
 
@@ -134,6 +145,7 @@ class SettingsPage(QWidget):
         self.main_win.settings.data["font_scale"] = sel
         self.main_win.settings.data["base_font_px"] = scale_map.get(sel, 14)
         self.main_win.settings.data["learning_mode"] = self.mode_drop.currentText()
+        self.main_win.settings.data["offline_only"] = self.offline_check.isChecked()
         self.main_win.settings.data["voice_id"] = self.voice_drop.currentText()
         self.main_win.settings.data["refresh_period"] = self.refresh_drop.currentText()
         sp_txt = self.speed_drop.currentText().split()[0]
@@ -155,6 +167,7 @@ class SettingsPage(QWidget):
         self._collect_settings()
         self._collect_sources()
         self.main_win.settings.save()
+        lexical_engine.set_offline_only(self.main_win.settings.data["offline_only"])
         self.main_win._apply_theme()
         if self.main_win.current_term and self.main_win.current_data:
             self.main_win.results_page.render(self.main_win.current_term, self.main_win.current_data)

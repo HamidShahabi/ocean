@@ -335,6 +335,32 @@ def apply_theme(settings_data: dict) -> str:
             background: transparent;
             border: none;
         }}
+        QCheckBox {{
+            color: {c['text_main']};
+            font-size: {px}px;
+            spacing: 8px;
+            background: transparent;
+        }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 1px solid {c['text_muted']};
+            border-radius: 5px;
+            background: transparent;
+        }}
+        QCheckBox::indicator:checked {{
+            border-color: {c['accent']};
+            background: {c['accent']};
+        }}
+        QLabel#OfflineBadge {{
+            color: {c['accent']};
+            font-size: {max(11, px - 1)}px;
+            font-weight: 600;
+            background: transparent;
+            border: 1px solid {c['accent']};
+            border-radius: 12px;
+            padding: 6px 12px;
+        }}
         QLabel#HistoryTermLabel {{
             color: {c['text_main']};
             font-size: {px}px;

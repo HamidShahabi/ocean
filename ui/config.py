@@ -56,6 +56,7 @@ class SettingsManager:
         # Names (DictionarySource.name) of the dictionary sources switched off in Settings. Storing the
         # off ones keeps every source, including any added later, on by default.
         "disabled_sources": [],
+        "offline_only": False,
     }
 
     def __init__(self, path: str = SETTINGS_FILE) -> None:

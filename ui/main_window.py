@@ -50,6 +50,7 @@ class MainWindow(QMainWindow):
 
         self.settings = SettingsManager()
         self.settings.apply_sources()
+        lexical_engine.set_offline_only(bool(self.settings.data.get("offline_only")))
         self.db = storage.HistoryStore(DB_FILE)
         self.speaker = NeuralSpeaker(self.settings)
         self.current_term: Optional[str] = None

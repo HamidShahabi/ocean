@@ -81,6 +81,11 @@ def card_texts(win):
     return texts
 
 
+def offline_badges(win):
+    layout = win.results_page.cards_layout
+    return [w for w in (layout.itemAt(i).widget() for i in range(layout.count())) if w and w.objectName() == "OfflineBadge"]
+
+
 class UiSmokeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -99,6 +104,8 @@ class UiSmokeTest(unittest.TestCase):
         for payload in (WORD, SENTENCE, REVERSE, IDIOM):
             self.win.db.delete_entry(payload["headword"])
         self.win.settings.data["theme"] = "Dark Mode"
+        self.win.settings.data["offline_only"] = False
+        lexical_engine.set_offline_only(False)
         self.win.settings.data["disabled_sources"] = []
         self.win.settings.apply_sources()
         self.win.close()
@@ -239,6 +246,29 @@ class UiSmokeTest(unittest.TestCase):
             page._save_and_close()
         self.assertEqual(theme.THEME_COLORS["bg_main"], "#0E1621")
         self.assertFalse(self.win.right_drawer.isVisible())
+
+    def test_offline_only_setting_applies_to_engine_and_marks_results(self):
+        page = self.win.right_drawer.settings_page
+        self.assertFalse(page.offline_check.isChecked())
+        self.win.results_page.render("serendipity", WORD)
+        self.assertEqual(offline_badges(self.win), [])
+        page.offline_check.setChecked(True)
+        with mock.patch.object(self.win.settings, "save") as save:
+            page._apply_live()
+        self.assertTrue(save.called)
+        self.assertTrue(self.win.settings.data["offline_only"])
+        self.assertTrue(lexical_engine.is_offline_only())
+        for payload in (WORD, SENTENCE, REVERSE, IDIOM):  # applying re-renders; every kind shows the badge
+            self.win.results_page.render(payload["headword"], payload)
+            badges = offline_badges(self.win)
+            self.assertEqual(len(badges), 1, payload["headword"])
+            self.assertIn("Offline-only mode", badges[0].text())
+        page.offline_check.setChecked(False)
+        with mock.patch.object(self.win.settings, "save"):
+            page._apply_live()
+        self.assertFalse(lexical_engine.is_offline_only())
+        self.win.results_page.render("serendipity", WORD)
+        self.assertEqual(offline_badges(self.win), [])
 
     def test_settings_lists_every_source_and_applies_the_toggles(self):
         registry = dictionary_sources.REGISTRY
