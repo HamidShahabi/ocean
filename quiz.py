@@ -7,19 +7,25 @@
 # options is recognition, a much weaker signal than the free-recall self-grade SM-2 expects, and a
 # 25% guess rate would push wrongly-known words onto long intervals. Review stays the one place
 # that schedules cards, so its "due" counts keep their meaning and the quiz stays low-stakes practice.
+# Typed modes (fill in the blank) follow the same rule: typing is real recall, but a quiz round has no
+# self-grade or "how hard was it" signal, and a blanked sentence is easier than recalling a word cold,
+# so it stays practice only. Keeping every quiz mode consistent ("quizzes never schedule") is simpler to explain.
 import random
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
+import cloze
 import lexical_engine
 
 CHOICE_MODE = "choice"
+CLOZE_MODE = "cloze"
 SESSION_LENGTH = 10
 CHOICE_COUNT = 4
 EN_TO_FA = "en_fa"
 FA_TO_EN = "fa_en"
 DIRECTIONS = (EN_TO_FA, FA_TO_EN)
+EN_ONLY = "en_en"  # English prompt and English answer (fill in the blank)
 
 
 def _norm(text: str) -> str:
@@ -76,13 +82,23 @@ def items_from_entries(entries: Sequence[Dict[str, Any]]) -> List[QuizItem]:
 
 @dataclass(frozen=True)
 class Question:
-    """What the quiz page shows. `choices` set = pick one; empty = type the answer (later modes)."""
+    """What the quiz page shows. `choices` set = pick one; empty = type the answer (the page's typed-answer
+    input handles any such question). `accepted` are extra answers that also count (a typed answer is checked
+    case-insensitively against `answer` and these); `reveal` is shown once answered (e.g. the full
+    sentence); `hint` replaces the page's default instruction line."""
     mode: str
     prompt: str
     answer: str
     query_key: str
     direction: str = EN_TO_FA
     choices: Tuple[str, ...] = ()
+    accepted: Tuple[str, ...] = ()
+    reveal: str = ""
+    hint: str = ""
+
+    @property
+    def is_typed(self) -> bool:
+        return not self.choices
 
     @property
     def prompt_is_persian(self) -> bool:
@@ -93,7 +109,8 @@ class Question:
         return self.direction == EN_TO_FA
 
     def is_correct(self, response: str) -> bool:
-        return _norm(response) == _norm(self.answer)
+        key = _norm(response)
+        return bool(key) and key in {_norm(a) for a in (self.answer, *self.accepted)}
 
 
 Generator = Callable[[Sequence[QuizItem], random.Random, int], List[Question]]
@@ -143,6 +160,51 @@ def generate_choice_questions(items: Sequence[QuizItem], rng: random.Random, cou
     return questions
 
 
+def cloze_candidates(item: QuizItem) -> List[cloze.Cloze]:
+    """Every example sentence of a saved word that contains the word or an inflection of it, blanked."""
+    comparative = any("adj" in str(s.get("pos", "")).lower() for s in item.payload.get("senses") or [] if isinstance(s, dict))
+    found: List[cloze.Cloze] = []
+    seen = set()
+    # Senses first, then collocation examples; synonym/antonym examples are about other words.
+    for key in ("senses", "collocations"):
+        for row in item.payload.get(key) or []:
+            sentence = row.get("example_en") if isinstance(row, dict) else ""
+            if not isinstance(sentence, str) or sentence.strip().lower() in seen:
+                continue
+            seen.add(sentence.strip().lower())
+            blanked = cloze.make_cloze(sentence, item.english, comparative)
+            if blanked is not None:
+                found.append(blanked)
+    return found
+
+
+def generate_cloze_questions(items: Sequence[QuizItem], rng: random.Random, count: int = SESSION_LENGTH) -> List[Question]:
+    """Typed fill-in-the-blank questions: one example sentence per saved word with the word (or an inflected
+    form: run/runs/ran/running, "break the ice"/"broke the ice") blanked. Words with no usable example are
+    skipped. The answer is the form that was in the sentence; the base word as saved is accepted too."""
+    pool = list(items)
+    rng.shuffle(pool)
+    questions: List[Question] = []
+    for item in pool:
+        if len(questions) >= count:
+            break
+        candidates = cloze_candidates(item)
+        if not candidates:
+            continue
+        chosen = rng.choice(candidates)
+        questions.append(Question(
+            mode=CLOZE_MODE,
+            prompt=chosen.blanked,
+            answer=chosen.forms[0],
+            query_key=item.query_key,
+            direction=EN_ONLY,
+            accepted=(*chosen.forms[1:], item.english),
+            reveal=chosen.sentence,
+            hint=f"Type the missing word or phrase · meaning: {item.persian}",
+        ))
+    return questions
+
+
 MODES: Dict[str, QuizMode] = {}
 
 
@@ -156,6 +218,17 @@ register_mode(QuizMode(
     generate=generate_choice_questions,
     min_items=CHOICE_COUNT,
     requirement=f"Multiple choice needs at least {CHOICE_COUNT} saved words with different meanings. "
+                "Save words with ☆ Save on a result card.",
+))
+
+
+register_mode(QuizMode(
+    key=CLOZE_MODE,
+    label="Fill in the blank",
+    generate=generate_cloze_questions,
+    min_items=1,
+    requirement="Fill in the blank needs saved words whose example sentence contains the word "
+                "(or a form of it, like \"ran\" for \"run\"); other saved words are skipped. "
                 "Save words with ☆ Save on a result card.",
 ))
 

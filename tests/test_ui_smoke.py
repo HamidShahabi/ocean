@@ -299,6 +299,86 @@ class UiSmokeTest(unittest.TestCase):
         QTest.keyClick(page, Qt.Key.Key_Escape)
         self.assertIs(self.win.stack.currentWidget(), self.win.home_page)
 
+    def save_cloze_words(self):
+        words = {
+            "run": ("دویدن", "She ran to the station every morning."),
+            "break the ice": ("یخ را شکستن", "Tom broke the ice with a joke."),
+        }
+        for en, (fa, example) in words.items():
+            payload = {"headword": en, "persian_equivalent": fa, "senses": [{"pos": "Verb", "def": "d", "example_en": example}]}
+            self.win.db.save_entry(en, payload)
+            self.win.db.toggle_favorite(en)
+        self.win.db.save_entry("door", {"headword": "door", "persian_equivalent": "در"})  # no example: skipped
+        self.win.db.toggle_favorite("door")
+        self.quiz_words = [*words, "door"]
+
+    def open_cloze_quiz(self):
+        self.save_cloze_words()
+        self.win.open_quiz()
+        QTest.qWaitForWindowActive(self.win)
+        page = self.win.quiz_page
+        self.assertTrue(page.mode_drop.isVisible())  # two modes now: the picker shows up
+        page._on_mode_picked("Fill in the blank")
+        return page
+
+    def test_quiz_fill_in_the_blank_typed_answers(self):
+        page = self.open_cloze_quiz()
+        self.assertEqual(len(page.questions), 2)  # "door" has no example
+        self.assertTrue(page.typed_box.isVisible())
+        self.assertFalse(page.choice_box.isVisible())
+        self.assertTrue(page.answer_edit.hasFocus())
+        self.assertIn("_____", page.prompt_label.text())
+
+        # Keys 1-4, Space and letters are typed into the box, not treated as shortcuts.
+        QTest.keyClicks(page.answer_edit, "1 2 x")
+        self.assertEqual(page.answer_edit.text(), "1 2 x")
+        self.assertFalse(page.answered)
+        self.assertEqual(page.results, [])
+        QTest.keyClick(page.answer_edit, Qt.Key.Key_Return)  # wrong answer
+        self.assertTrue(page.answered)
+        self.assertIn("Not quite", page.verdict_label.text())
+        question = page.questions[0]
+        self.assertIn(question.answer, page.verdict_label.text())
+        self.assertEqual(page.reveal_label.text(), question.reveal)  # the full sentence
+        self.assertTrue(page.answer_edit.isReadOnly())
+        self.assertTrue(page.next_btn.isVisible())
+
+        QTest.keyClick(page, Qt.Key.Key_Space)  # continue
+        self.assertFalse(page.answered)
+        self.assertEqual(page.answer_edit.text(), "")
+        self.assertFalse(page.answer_edit.isReadOnly())
+        self.assertTrue(page.answer_edit.hasFocus())
+        QTest.keyClick(page.answer_edit, Qt.Key.Key_Return)  # empty input is ignored
+        self.assertFalse(page.answered)
+        # The base word as saved is accepted, in any case.
+        QTest.keyClicks(page.answer_edit, page.questions[1].accepted[-1].upper())
+        QTest.keyClick(page.answer_edit, Qt.Key.Key_Return)
+        self.assertIn("Correct", page.verdict_label.text())
+        QTest.keyClick(page, Qt.Key.Key_Return)  # Enter continues too
+        self.assertTrue(page.finished)
+        self.assertEqual(page.prompt_label.text(), "1 of 2 correct")
+        self.assertIn(question.reveal, page.done_label.text())  # missed sentence listed to practise
+        # Typed answers don't schedule reviews either.
+        with closing(sqlite3.connect(DB_FILE)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 0)
+
+    def test_quiz_switching_back_to_multiple_choice_hides_the_typed_box(self):
+        page = self.open_cloze_quiz()
+        self.save_quiz_words()
+        page._on_mode_picked("Multiple choice")
+        self.assertFalse(page.typed_box.isVisible())
+        self.assertTrue(page.choice_box.isVisible())
+        QTest.keyClick(page, "1")
+        self.assertTrue(page.answered)
+
+    def test_quiz_cloze_needs_an_example_sentence(self):
+        self.save_quiz_words()  # four words, none with an example
+        self.win.open_quiz()
+        page = self.win.quiz_page
+        page._on_mode_picked("Fill in the blank")
+        self.assertIn("example sentence", page.done_label.text())
+        self.assertFalse(page.typed_box.isVisible())
+
     def test_quiz_reachable_from_home_and_menu(self):
         self.save_quiz_words()
         self.win.home_quiz_btn.click()
