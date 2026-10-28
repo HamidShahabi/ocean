@@ -122,6 +122,92 @@ class ChoiceQuestionTest(unittest.TestCase):
         self.assertFalse(fa.is_correct("آب"))
 
 
+class ClozeQuestionTest(unittest.TestCase):
+    RUN = QuizItem("run", "run", "دویدن", {"senses": [
+        {"pos": "Verb", "def": "Move fast.", "example_en": "She ran to the station every morning."},
+        {"pos": "Verb", "def": "Operate.", "example_en": "They run a small shop."},
+        {"pos": "Verb", "def": "Other.", "example_en": "Nothing relevant lives in this one."},
+    ]})
+    ICE = QuizItem("break the ice", "break the ice", "یخ را شکستن", {"senses": [
+        {"pos": "Idiom", "def": "Start talking.", "example_en": "Tom broke the ice with a joke."}]})
+    BOOK = QuizItem("book", "book", "کتاب", {"senses": [{"pos": "Noun", "def": "Pages.", "example_en": ""}]})
+    BARE = QuizItem("door", "door", "در")  # saved without a payload: nothing to blank
+
+    def questions(self, items, seed=0, count=10):
+        return quiz.new_session(items, quiz.CLOZE_MODE, random.Random(seed), count)
+
+    def test_mode_is_registered_and_typed(self):
+        self.assertIn(quiz.CLOZE_MODE, quiz.MODES)
+        for q in self.questions([self.RUN, self.ICE]):
+            self.assertTrue(q.is_typed)
+            self.assertEqual(q.choices, ())
+
+    def test_sentence_is_blanked_and_revealed_in_full(self):
+        by_key = {q.query_key: q for q in self.questions([self.RUN, self.ICE])}
+        ice = by_key["break the ice"]
+        self.assertEqual(ice.prompt, "Tom _____ with a joke.")
+        self.assertEqual(ice.reveal, "Tom broke the ice with a joke.")
+        self.assertEqual(ice.answer, "broke the ice")
+        run = by_key["run"]
+        self.assertIn("_____", run.prompt)
+        self.assertNotIn(run.answer, run.prompt)
+        self.assertIn(run.answer, run.reveal)
+        self.assertIn("دویدن", run.hint)
+        self.assertFalse(run.prompt_is_persian or run.answer_is_persian)
+
+    def test_one_of_the_usable_sentences_is_picked(self):
+        seen = {q.reveal for seed in range(20) for q in self.questions([self.RUN], seed=seed)}
+        self.assertEqual(seen, {"She ran to the station every morning.", "They run a small shop."})
+
+    def test_words_without_a_suitable_example_are_skipped(self):
+        qs = self.questions([self.BOOK, self.BARE, self.RUN])
+        self.assertEqual([q.query_key for q in qs], ["run"])
+        self.assertEqual(self.questions([self.BOOK, self.BARE]), [])
+
+    def test_collocation_examples_count_but_synonym_examples_do_not(self):
+        item = QuizItem("tea", "tea", "چای", {
+            "collocations": [{"term": "strong tea", "example_en": "I like strong tea in the morning."}],
+            "synonyms": [{"term": "brew", "example_en": "The tea was a lovely brew."}]})
+        qs = self.questions([item])
+        self.assertEqual([q.reveal for q in qs], ["I like strong tea in the morning."])
+
+    def test_adjectives_blank_comparatives(self):
+        big = QuizItem("big", "big", "بزرگ", {"senses": [
+            {"pos": "Adjective", "def": "Large.", "example_en": "This house is bigger than ours."}]})
+        self.assertEqual(self.questions([big])[0].prompt, "This house is _____ than ours.")
+        noun = QuizItem("big", "big", "بزرگ", {"senses": [
+            {"pos": "Noun", "def": "Large.", "example_en": "This house is bigger than ours."}]})
+        self.assertEqual(self.questions([noun]), [])
+
+    def test_exact_form_or_base_word_is_accepted_case_insensitively(self):
+        q = [q for q in self.questions([self.ICE])][0]
+        for ok in ("broke the ice", "  Broke The ICE ", "break the ice", "BREAK THE ICE"):
+            self.assertTrue(q.is_correct(ok), ok)
+        for bad in ("", "   ", "broke", "breaks the ice"):
+            self.assertFalse(q.is_correct(bad), bad)
+
+    def test_every_form_blanked_in_a_sentence_is_accepted(self):
+        item = QuizItem("run", "run", "دویدن", {"senses": [
+            {"pos": "Verb", "def": "Move.", "example_en": "Run when he runs, said the coach."}]})
+        q = self.questions([item])[0]
+        self.assertEqual(q.prompt, "_____ when he _____, said the coach.")
+        for ok in ("run", "Run", "runs", "RUNS"):
+            self.assertTrue(q.is_correct(ok), ok)
+        self.assertFalse(q.is_correct("ran"))
+
+    def test_session_is_capped_and_repeatable(self):
+        items = [QuizItem(w, w, "x", {"senses": [{"pos": "Noun", "def": "d", "example_en": f"I saw a {w} there today."}]})
+                 for w in ("cat", "dog", "bird", "fish", "frog")]
+        self.assertEqual(len(self.questions(items, count=3)), 3)
+        self.assertEqual(self.questions(items, seed=4), self.questions(items, seed=4))
+
+    def test_no_saved_words_gives_a_helpful_message(self):
+        self.assertEqual(self.questions([]), [])
+        msg = quiz.unavailable_message(quiz.CLOZE_MODE, 2)
+        self.assertIn("example sentence", msg)
+        self.assertIn("2 usable saved words", msg)
+
+
 class ModeRegistryTest(unittest.TestCase):
     def test_new_modes_plug_in_through_the_registry(self):
         def generate(items, rng, count):

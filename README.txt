@@ -46,6 +46,17 @@ QUIZ
   your Review schedule: picking from four options is a much weaker signal than
   recalling a word and grading yourself, so only Review schedules cards.
 
+  Fill in the blank: once you have more than one quiz mode, a picker next to the
+  title switches between them. This mode shows an example sentence of a saved
+  word with the word blanked out (every form of it: "run" also blanks runs, ran,
+  running; "break the ice" also blanks "broke the ice") and you type it. Press
+  Enter to check, then Enter or Space for the next one; keys 1-4 and Space type
+  normally while the answer box is focused. Answers ignore upper/lower case, and
+  either the form used in the sentence ("ran") or the word as you saved it
+  ("run") counts. The full sentence is shown after each answer. Saved words
+  without an example sentence that contains the word are skipped. Typed answers
+  do not change your Review schedule either.
+
 HISTORY SEARCH AND SORTING
   Menu > History has a search box that filters as you type, in English or
   Persian (it matches the word and its Persian meaning; Arabic and Persian
