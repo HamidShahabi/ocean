@@ -27,14 +27,15 @@ class HistoryStoreTest(unittest.TestCase):
         with open(storage.__file__, encoding="utf-8") as f:
             self.assertNotIn("PyQt", f.read())
 
-    def test_schema_is_unchanged(self):
+    def test_schema_has_the_original_columns_plus_lookup_count(self):
         conn = sqlite3.connect(self.db_path)
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(lexicon)")]
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(cols, ["id", "query_key", "display_term", "payload", "is_favorite", "updated_at"])
+        self.assertEqual(cols[:6], ["id", "query_key", "display_term", "payload", "is_favorite", "updated_at"])
+        self.assertIn("lookup_count", cols)
         self.assertEqual(mode, "wal")
 
     def test_save_then_get_normalises_the_key(self):
@@ -96,7 +97,8 @@ class HistoryStoreTest(unittest.TestCase):
         everything = self.store.list_entries()
         self.assertEqual([e["query_key"] for e in everything], ["new", "mid", "old"])
         self.assertEqual(everything[0], {"query_key": "new", "display_term": "new",
-                                         "is_favorite": True, "updated_at": "2026-01-03T00:00:00"})
+                                         "is_favorite": True, "updated_at": "2026-01-03T00:00:00",
+                                         "lookup_count": 1})
         self.assertFalse(everything[1]["is_favorite"])
         self.assertEqual([e["query_key"] for e in self.store.list_entries(favorites_only=True)], ["new", "old"])
 
@@ -129,6 +131,176 @@ class HistoryStoreTest(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(self.store.english_entries_with_persian(FLEETING), ["good"])
+
+
+class HistorySearchAndSortTest(unittest.TestCase):
+    OLD_SCHEMA = """
+        CREATE TABLE lexicon (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query_key TEXT UNIQUE NOT NULL,
+            display_term TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            is_favorite INTEGER DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.db_path = os.path.join(self._dir.name, "lexicon_vault.db")
+        self.store = storage.HistoryStore(self.db_path)
+
+    def _sql(self, sql, *params):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
+    def _stamp(self, term, stamp):
+        self._sql("UPDATE lexicon SET updated_at = ? WHERE query_key = ?", stamp, term)
+
+    def _keys(self, **kwargs):
+        return [e["query_key"] for e in self.store.list_entries(**kwargs)]
+
+    def _populate(self):
+        # sea (oldest, saved), sky, moon (newest, saved); each with a Persian meaning
+        for term, fa, stamp in (("sea", "دریا", "2026-01-01T00:00:00"),
+                                ("sky", "آسمان", "2026-01-02T00:00:00"),
+                                ("moon", "ماه", "2026-01-03T00:00:00")):
+            self.store.save_entry(term, {"headword": term, "persian_equivalent": fa})
+            self._stamp(term, stamp)
+        self.store.toggle_favorite("sea")
+        self.store.toggle_favorite("moon")
+
+    # migration
+
+    def test_old_schema_database_is_migrated_and_entries_start_at_one(self):
+        path = os.path.join(self._dir.name, "old.db")
+        conn = sqlite3.connect(path)
+        with conn:
+            conn.execute(self.OLD_SCHEMA)
+            conn.execute("INSERT INTO lexicon (query_key, display_term, payload, is_favorite, updated_at) "
+                         "VALUES ('sea', 'sea', '{\"headword\": \"sea\"}', 1, '2026-01-01T00:00:00')")
+        conn.close()
+        store = storage.HistoryStore(path)
+        entries = store.list_entries()
+        self.assertEqual([(e["query_key"], e["lookup_count"], e["is_favorite"]) for e in entries],
+                         [("sea", 1, True)])
+        self.assertEqual(store.get_entry("sea")["headword"], "sea")
+
+    def test_migration_is_idempotent_and_keeps_counts(self):
+        self.store.save_entry("sea", {"headword": "sea"})
+        self.store.record_lookup("sea")
+        reopened = storage.HistoryStore(self.db_path)
+        storage.HistoryStore(self.db_path)
+        self.assertEqual(reopened.list_entries()[0]["lookup_count"], 2)
+        cols = [r[1] for r in self._sql("PRAGMA table_info(lexicon)")]
+        self.assertEqual(cols.count("lookup_count"), 1)
+
+    def test_migration_coexists_with_other_added_columns(self):
+        self._sql("ALTER TABLE lexicon ADD COLUMN produced_at TEXT")
+        self.store.save_entry("sea", {"headword": "sea"})
+        reopened = storage.HistoryStore(self.db_path)
+        self.assertEqual(reopened.list_entries()[0]["lookup_count"], 1)
+
+    # counter
+
+    def test_new_entry_starts_at_one_and_save_entry_never_changes_the_count(self):
+        self.store.save_entry("sea", {"headword": "sea"})
+        self.assertEqual(self.store.list_entries()[0]["lookup_count"], 1)
+        self.store.save_entry("sea", {"headword": "Sea", "v": 2})  # refresh / re-save
+        self.assertEqual(self.store.list_entries()[0]["lookup_count"], 1)
+
+    def test_record_lookup_increments_and_survives_a_resave(self):
+        self.store.save_entry("sea", {"headword": "sea"})
+        self.store.record_lookup(" SEA ")
+        self.store.record_lookup("sea")
+        self.assertEqual(self.store.list_entries()[0]["lookup_count"], 3)
+        self.store.save_entry("sea", {"headword": "sea", "v": 2})
+        self.assertEqual(self.store.list_entries()[0]["lookup_count"], 3)
+
+    def test_record_lookup_of_an_unknown_term_stores_nothing(self):
+        self.store.record_lookup("never saved")
+        self.assertEqual(self.store.list_entries(), [])
+
+    def test_record_lookup_moves_the_entry_to_the_top_of_recent(self):
+        self._populate()
+        self.assertEqual(self._keys()[0], "moon")
+        self.store.record_lookup("sea")
+        self.assertEqual(self._keys()[0], "sea")
+
+    # search
+
+    def test_search_matches_english_display_term_case_insensitively(self):
+        self._populate()
+        self.assertEqual(self._keys(query="SE"), ["sea"])
+        self.assertEqual(self._keys(query="  oo "), ["moon"])
+        self.assertEqual(self._keys(query="zzz"), [])
+
+    def test_blank_query_lists_everything(self):
+        self._populate()
+        self.assertEqual(self._keys(query="   "), ["moon", "sky", "sea"])
+        self.assertEqual(self._keys(query=""), ["moon", "sky", "sea"])
+
+    def test_search_matches_the_persian_meaning_with_letter_variants(self):
+        self.store.save_entry("ephemeral", {"headword": "ephemeral", "persian_equivalent": f"{PASSING}، {FLEETING}"})
+        self.store.save_entry("sea", {"headword": "sea", "persian_equivalent": "دریا"})
+        self.store.save_entry("book", {"headword": "book", "persian_equivalent": "کتاب"})
+        self.store.save_entry("hand", {"headword": "hand", "persian_equivalent": "دستِ"})
+        self.assertEqual(self._keys(query=PASSING), ["ephemeral"])
+        self.assertEqual(self._keys(query=FLEETING[:4]), ["ephemeral"])
+        self.assertEqual(self._keys(query="كتاب"), ["book"])  # Arabic kaf
+        self.assertEqual(self._keys(query="دريا"), ["sea"])  # Arabic yeh
+        self.assertEqual(self._keys(query="دست"), ["hand"])  # stored form carries a diacritic
+
+    def test_search_matches_a_persian_display_term(self):
+        self.store.save_entry(FLEETING, {"headword": FLEETING, "is_reverse": True})
+        self.store.save_entry("sea", {"headword": "sea", "persian_equivalent": "دریا"})
+        self.assertEqual(self._keys(query=FLEETING), [FLEETING])
+
+    def test_search_copes_with_corrupt_payloads(self):
+        self._sql("INSERT INTO lexicon (query_key, display_term, payload, updated_at) "
+                  "VALUES ('bad', 'bad', 'not json', '2026-01-01T00:00:00')")
+        self._sql("INSERT INTO lexicon (query_key, display_term, payload, updated_at) "
+                  "VALUES ('odd', 'odd', '[1, 2]', '2026-01-01T00:00:00')")
+        self.assertEqual(self._keys(query="bad"), ["bad"])
+        self.assertEqual(self._keys(query="دریا"), [])
+
+    # sort
+
+    def test_sort_most_looked_up(self):
+        self._populate()
+        self.store.record_lookup("sky")
+        self.store.record_lookup("sky")
+        self.store.record_lookup("sea")
+        self._stamp("sky", "2026-01-02T00:00:00")
+        self._stamp("sea", "2026-01-01T00:00:00")
+        self.assertEqual(self._keys(sort=storage.SORT_MOST_LOOKED_UP), ["sky", "sea", "moon"])
+        self.assertEqual(self._keys(sort=storage.SORT_RECENT), ["moon", "sky", "sea"])
+        self.assertEqual(self._keys(), ["moon", "sky", "sea"])  # recent is the default
+
+    def test_equal_counts_sort_newest_first(self):
+        self._populate()
+        self.assertEqual(self._keys(sort=storage.SORT_MOST_LOOKED_UP), ["moon", "sky", "sea"])
+
+    # combined with the favourites filter
+
+    def test_search_and_sort_combine_with_the_favourites_filter(self):
+        self._populate()
+        self.store.record_lookup("sea")
+        self.store.record_lookup("sky")
+        self.store.record_lookup("sky")
+        self._stamp("sea", "2026-01-01T00:00:00")
+        self.assertEqual(self._keys(favorites_only=True), ["moon", "sea"])
+        self.assertEqual(self._keys(favorites_only=True, sort=storage.SORT_MOST_LOOKED_UP), ["sea", "moon"])
+        self.assertEqual(self._keys(favorites_only=True, query="دریا"), ["sea"])
+        self.assertEqual(self._keys(favorites_only=True, query="sky"), [])  # sky is not saved
+        self.assertEqual(self._keys(favorites_only=True, query="o", sort=storage.SORT_MOST_LOOKED_UP), ["moon"])
+        self.assertEqual(self._keys(query="sky"), ["sky"])
+        self.assertEqual(self._keys(sort=storage.SORT_MOST_LOOKED_UP)[0], "sky")
 
 
 class ConnectionHandlingTest(unittest.TestCase):

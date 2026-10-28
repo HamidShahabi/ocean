@@ -8,10 +8,12 @@ import shutil
 import logging
 import sqlite3
 import threading
-from contextlib import closing
+import contextvars
+from collections import OrderedDict
+from contextlib import closing, contextmanager
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, Iterator, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -435,13 +437,155 @@ WEAK_FORM_IPA = {
 
 
 # === SECTION 3: NETWORK, SENTENCE AUTO-CORRECTION & SANITIZATION UTILITIES ===
-def smart_request(method: str, url: str, **kwargs) -> requests.Response:
+def _send_request(method: str, url: str, **kwargs) -> requests.Response:
     """Unblocked hybrid request: tries normal pooled session first, then direct session."""
     kwargs.setdefault("timeout", 3.0)
     try:
         return POOLED_SESSION.request(method, url, **kwargs)
     except Exception:
         return DIRECT_SESSION.request(method, url, **kwargs)
+
+
+class _InFlight:
+    """One request being made right now; identical requests from other threads wait for its outcome."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.response: Optional[requests.Response] = None
+        self.error: Optional[BaseException] = None
+
+
+class RequestCache:
+    """Answers identical network requests made during one lookup from memory.
+
+    Thread-safe; identical requests running at the same moment share one call. Only successful
+    responses are kept (a failed or rate-limited one is shared with the callers already waiting for it,
+    never remembered), at most `max_entries` of them, the least recently used going first.
+    POST is keyed by its full body, so only the very same request is ever answered from here."""
+
+    CACHEABLE_METHODS = ("GET", "HEAD", "POST")
+    KEY_KWARGS = ("params", "data", "json", "headers", "timeout", "allow_redirects")
+    MAX_BODY_BYTES = 1_000_000  # a response bigger than this is passed on but not kept
+
+    def __init__(self, max_entries: int = 128) -> None:
+        self.max_entries = max_entries
+        self.hits = 0
+        self.misses = 0
+        self._lock = threading.Lock()
+        self._entries: "OrderedDict[Any, requests.Response]" = OrderedDict()
+        self._in_flight: Dict[Any, _InFlight] = {}
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    @staticmethod
+    def _freeze(value: Any) -> Any:
+        if isinstance(value, dict):
+            return ("dict", tuple(sorted(((str(k), RequestCache._freeze(v)) for k, v in value.items()), key=repr)))
+        if isinstance(value, (list, tuple)):
+            return ("seq", tuple(RequestCache._freeze(v) for v in value))
+        if isinstance(value, (str, bytes, int, float, bool)) or value is None:
+            return value
+        raise TypeError("not part of a cache key")
+
+    @classmethod
+    def make_key(cls, method: str, url: str, kwargs: Dict[str, Any]) -> Optional[Any]:
+        """None when the request must not be cached (unknown arguments, streaming, odd bodies...)."""
+        if method.upper() not in cls.CACHEABLE_METHODS:
+            return None
+        parts = []
+        for name, value in kwargs.items():
+            if name == "timeout":
+                continue  # how long to wait does not change the answer
+            if name not in cls.KEY_KWARGS:
+                return None
+            try:
+                parts.append((name, cls._freeze(value)))
+            except TypeError:
+                return None
+        return (method.upper(), url, tuple(sorted(parts, key=repr)))
+
+    def request(self, method: str, url: str, send=_send_request, **kwargs) -> requests.Response:
+        key = self.make_key(method, url, kwargs)
+        if key is None:
+            return send(method, url, **kwargs)
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is not None:
+                self._entries.move_to_end(key)
+                self.hits += 1
+                return hit
+            flight = self._in_flight.get(key)
+            leader = flight is None
+            if leader:
+                flight = self._in_flight[key] = _InFlight()
+                self.misses += 1
+            else:
+                self.hits += 1
+        if not leader:
+            flight.done.wait()
+            if flight.error is not None:
+                raise flight.error
+            return flight.response
+        try:
+            response = send(method, url, **kwargs)
+            flight.response = response
+            if self._worth_keeping(response):
+                with self._lock:
+                    self._entries[key] = response
+                    while len(self._entries) > self.max_entries:
+                        self._entries.popitem(last=False)
+            return response
+        except BaseException as exc:
+            flight.error = exc
+            raise
+        finally:
+            with self._lock:
+                self._in_flight.pop(key, None)
+            flight.done.set()
+
+    @classmethod
+    def _worth_keeping(cls, response: Any) -> bool:
+        try:
+            return bool(response.ok) and len(response.content) <= cls.MAX_BODY_BYTES
+        except Exception:
+            return False
+
+
+# The cache of the lookup running in this context, if any. Each lookup (a QThread of its own in the
+# app) sets its own, so lookups never share one; worker threads started inside a lookup must be
+# given the context with submit_in_context() or they will not see it.
+_LOOKUP_CACHE: "contextvars.ContextVar[Optional[RequestCache]]" = contextvars.ContextVar("lookup_cache", default=None)
+
+
+@contextmanager
+def lookup_request_cache(max_entries: int = 128) -> Iterator[RequestCache]:
+    """Every smart_request() inside the block, worker threads included, shares one cache that is
+    dropped when the block ends. Nested blocks reuse the outer cache."""
+    existing = _LOOKUP_CACHE.get()
+    if existing is not None:
+        yield existing
+        return
+    cache = RequestCache(max_entries)
+    token = _LOOKUP_CACHE.set(cache)
+    try:
+        yield cache
+    finally:
+        _LOOKUP_CACHE.reset(token)
+
+
+def submit_in_context(pool: ThreadPoolExecutor, fn, *args, **kwargs):
+    """pool.submit() that runs fn in a copy of the caller's context (executor threads do not inherit it)."""
+    return pool.submit(contextvars.copy_context().run, fn, *args, **kwargs)
+
+
+def smart_request(method: str, url: str, **kwargs) -> requests.Response:
+    """Network call used by everything: answered from the running lookup's cache when it has one."""
+    cache = _LOOKUP_CACHE.get()
+    if cache is None:
+        return _send_request(method, url, **kwargs)
+    return cache.request(method, url, _send_request, **kwargs)
 
 
 def normalize_persian(text: str, is_short_term: bool = False, source_en: str = "") -> str:
@@ -988,7 +1132,7 @@ def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[s
     still_missing = [x for x in (remaining_sentences + remaining_shorts) if not out.get(x)]
     if still_missing:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futs = {item: pool.submit(translate_single_string, item, item in short_set) for item in still_missing}
+            futs = {item: submit_in_context(pool, translate_single_string, item, item in short_set) for item in still_missing}
             for item, fut in futs.items():
                 res = fut.result()
                 out[item] = res or ("\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f" if item in short_set else "")
@@ -1284,6 +1428,11 @@ def lookup_cefr_level(term: str) -> str:
 
 
 def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, Any]:
+    with lookup_request_cache():  # identical requests within this one lookup reach the network once
+        return _analyze_with_dictionaries(term, deep_mode)
+
+
+def _analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, Any]:
     raw_input = term.strip()
     if is_persian_text(raw_input):
         return analyze_persian(raw_input)
@@ -1331,7 +1480,7 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
     sources = _dictionary_sources()
     ctx = sources.LookupContext(term=clean, is_idiom=is_idiom_or_phrase, deep_mode=deep_mode, root_lemma=root_lemma)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        f_fa = pool.submit(fetch_persian_word_meaning, clean, is_idiom_or_phrase)
+        f_fa = submit_in_context(pool, fetch_persian_word_meaning, clean, is_idiom_or_phrase)
         merged = sources.REGISTRY.run(ctx)  # every enabled dictionary source, merged in registry order
         fa_main = f_fa.result()
 
@@ -1446,8 +1595,8 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
     ][:3]
 
     with ThreadPoolExecutor(max_workers=6) as pool:
-        syn_ex_futs = {w: pool.submit(fetch_verified_example_for_relation, w, primary_pos) for w in syns_words}
-        ant_ex_futs = {w: pool.submit(fetch_verified_example_for_relation, w, primary_pos) for w in ants_words}
+        syn_ex_futs = {w: submit_in_context(pool, fetch_verified_example_for_relation, w, primary_pos) for w in syns_words}
+        ant_ex_futs = {w: submit_in_context(pool, fetch_verified_example_for_relation, w, primary_pos) for w in ants_words}
         syns_raw = [{"term": w, "example_en": syn_ex_futs[w].result()} for w in syns_words]
         ants_raw = [{"term": w, "example_en": ant_ex_futs[w].result()} for w in ants_words]
 
