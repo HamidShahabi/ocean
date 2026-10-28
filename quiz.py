@@ -10,26 +10,52 @@
 # Typed modes (fill in the blank) follow the same rule: typing is real recall, but a quiz round has no
 # self-grade or "how hard was it" signal, and a blanked sentence is easier than recalling a word cold,
 # so it stays practice only. Keeping every quiz mode consistent ("quizzes never schedule") is simpler to explain.
+# Listen and type is the same: hearing a word and spelling it is real recall, but there is still no self-grade.
 import random
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Collection, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import cloze
 import lexical_engine
 
 CHOICE_MODE = "choice"
 CLOZE_MODE = "cloze"
+LISTEN_MODE = "listen"
 SESSION_LENGTH = 10
 CHOICE_COUNT = 4
 EN_TO_FA = "en_fa"
 FA_TO_EN = "fa_en"
 DIRECTIONS = (EN_TO_FA, FA_TO_EN)
-EN_ONLY = "en_en"  # English prompt and English answer (fill in the blank)
+EN_ONLY = "en_en"  # English prompt and English answer (fill in the blank, listen and type)
+CAP_VOICE = "voice"  # runtime capability: Ocean can speak (see QuizMode.needs)
+CORRECT, ALMOST, WRONG = "correct", "almost", "wrong"  # Question.grade() verdicts
+# Listen and type tolerance: a typed answer one edit (insert, delete, substitute or swap of two neighbouring
+# letters) away from the word counts as "almost", never as correct, and only for words of at least this many
+# letters. Below that, one edit usually lands on another real word (cat/cut, from/form), so it's just wrong.
+NEAR_MISS_MIN_LETTERS = 5
+LISTEN_MAX_WORDS = 4  # saved entries longer than this are not read out: single words and short phrases only
+LISTEN_MAX_CHARS = 32
 
 
 def _norm(text: str) -> str:
-    return lexical_engine.fa_key(text or "").casefold()
+    return lexical_engine.fa_key((text or "").replace("\u2019", "'")).casefold()  # fa_key also collapses spaces
+
+
+def within_one_edit(a: str, b: str) -> bool:
+    """Damerau-Levenshtein (optimal string alignment) distance of at most 1: equal, or one insertion,
+    deletion, substitution or swap of two neighbouring letters apart."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diff = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1
+                                  and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+    short, long_ = sorted((a, b), key=len)
+    i = next((k for k in range(len(short)) if short[k] != long_[k]), len(short))
+    return short[i:] == long_[i + 1:]
 
 
 def _persian_parts(persian: str) -> FrozenSet[str]:
@@ -85,7 +111,9 @@ class Question:
     """What the quiz page shows. `choices` set = pick one; empty = type the answer (the page's typed-answer
     input handles any such question). `accepted` are extra answers that also count (a typed answer is checked
     case-insensitively against `answer` and these); `reveal` is shown once answered (e.g. the full
-    sentence); `hint` replaces the page's default instruction line."""
+    sentence); `hint` replaces the page's default instruction line. `speak` is text Ocean reads out loud when
+    the question appears and on replay (it must not give the answer away on screen: the page never shows it).
+    `near_miss` makes grade() report a one-typo answer as ALMOST instead of WRONG (spelling modes)."""
     mode: str
     prompt: str
     answer: str
@@ -95,6 +123,8 @@ class Question:
     accepted: Tuple[str, ...] = ()
     reveal: str = ""
     hint: str = ""
+    speak: str = ""
+    near_miss: bool = False
 
     @property
     def is_typed(self) -> bool:
@@ -112,6 +142,24 @@ class Question:
         key = _norm(response)
         return bool(key) and key in {_norm(a) for a in (self.answer, *self.accepted)}
 
+    def near_miss_of(self, response: str) -> str:
+        """The accepted spelling a wrong `response` is one typo away from, or "" (not a near-miss question,
+        correct already, too short to tell a typo from another word, or further off)."""
+        key = _norm(response)
+        if not self.near_miss or not key or self.is_correct(response):
+            return ""
+        for candidate in (self.answer, *self.accepted):
+            target = _norm(candidate)
+            if len(target.replace(" ", "")) >= NEAR_MISS_MIN_LETTERS and within_one_edit(key, target):
+                return candidate
+        return ""
+
+    def grade(self, response: str) -> str:
+        """CORRECT, ALMOST (one typo; only for near_miss questions, still scores as a miss) or WRONG."""
+        if self.is_correct(response):
+            return CORRECT
+        return ALMOST if self.near_miss_of(response) else WRONG
+
 
 Generator = Callable[[Sequence[QuizItem], random.Random, int], List[Question]]
 
@@ -123,6 +171,9 @@ class QuizMode:
     generate: Generator
     min_items: int          # saved words needed before the mode can run
     requirement: str        # shown on the quiz page when it can't
+    needs: str = ""         # runtime capability the mode depends on (CAP_VOICE), "" for none
+    needs_message: str = ""     # shown when that capability is missing
+    loading_message: str = ""   # shown while it is still being set up (the voice loads in the background)
 
 
 def generate_choice_questions(items: Sequence[QuizItem], rng: random.Random, count: int = SESSION_LENGTH) -> List[Question]:
@@ -205,6 +256,38 @@ def generate_cloze_questions(items: Sequence[QuizItem], rng: random.Random, coun
     return questions
 
 
+def is_listenable(item: QuizItem) -> bool:
+    """Whether a saved word is a single word or short phrase that can sensibly be read out and typed back."""
+    text = item.english
+    return (len(text) <= LISTEN_MAX_CHARS and len(text.split()) <= LISTEN_MAX_WORDS
+            and any(c.isalpha() for c in text) and all(c.isalpha() or c in " '\u2019-." for c in text))
+
+
+def listen_reveal(item: QuizItem) -> str:
+    """Shown after answering: IPA when the saved entry has it, then the Persian meaning."""
+    ipa = "" if item.payload.get("is_reverse") else str(item.payload.get("ipa_us") or "").strip()
+    return " · ".join(part for part in ("" if ipa == "/-/" else ipa, item.persian) if part)
+
+
+def generate_listen_questions(items: Sequence[QuizItem], rng: random.Random, count: int = SESSION_LENGTH) -> List[Question]:
+    """Typed listen-and-type questions: Ocean speaks a saved word and the player types it. The prompt never
+    shows the word or its meaning (that would give it away or turn it into translation); both come with the
+    reveal after answering. Saved sentences and anything longer than a short phrase are skipped."""
+    pool = [item for item in items if is_listenable(item)]
+    rng.shuffle(pool)
+    return [Question(
+        mode=LISTEN_MODE,
+        prompt="Listen and type the word",
+        answer=item.english,
+        query_key=item.query_key,
+        direction=EN_ONLY,
+        reveal=listen_reveal(item),
+        hint="Type what you hear · Ctrl+R replays it",
+        speak=item.english,
+        near_miss=True,
+    ) for item in pool[:count]]
+
+
 MODES: Dict[str, QuizMode] = {}
 
 
@@ -233,6 +316,21 @@ register_mode(QuizMode(
 ))
 
 
+register_mode(QuizMode(
+    key=LISTEN_MODE,
+    label="Listen and type",
+    generate=generate_listen_questions,
+    min_items=1,
+    requirement="Listen and type needs saved single words or short phrases (up to "
+                f"{LISTEN_MAX_WORDS} words); saved sentences are skipped. Save words with ☆ Save on a result card.",
+    needs=CAP_VOICE,
+    needs_message="Listen and type needs a voice to read the words out, and Ocean has none right now: the Kokoro "
+                  "voice could not be loaded and no system voice was found (Windows speech, or spd-say / "
+                  "espeak-ng on Linux). Install one and reopen the quiz.",
+    loading_message="Ocean's voice is still loading. Listen and type will start by itself in a moment.",
+))
+
+
 def new_session(items: Sequence[QuizItem], mode_key: str = CHOICE_MODE, rng: Optional[random.Random] = None,
                 count: int = SESSION_LENGTH) -> List[Question]:
     """A fresh run of questions in the given mode; empty when the saved words can't support it."""
@@ -247,3 +345,12 @@ def unavailable_message(mode_key: str, saved_count: int) -> str:
     mode = MODES[mode_key]
     have = "You have no saved words yet." if saved_count == 0 else f"You have {saved_count} usable saved word{'s' if saved_count != 1 else ''}."
     return f"{mode.requirement}\n{have}"
+
+
+def missing_capability(mode_key: str, available: Collection[str], loading: Collection[str] = ()) -> str:
+    """Why a mode can't run because of the machine rather than the saved words ("" when it can).
+    `available` are the capabilities present now, `loading` those still being set up."""
+    mode = MODES[mode_key]
+    if not mode.needs or mode.needs in available:
+        return ""
+    return mode.loading_message if mode.needs in loading and mode.loading_message else mode.needs_message
