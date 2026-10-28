@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lexical_engine
 import review
 import anki_export
+import desktop_lookup
 from PyQt6.QtCore import Qt, QThread, QDeadlineTimer, QStandardPaths, pyqtSignal, QBuffer, QIODevice, QTimer, QPoint, QRectF, QSize, QEvent, QObject
 from PyQt6.QtGui import (
     QFont,
@@ -1989,6 +1990,29 @@ class MainWindow(QMainWindow):
         self.refresh_review_badges()
         self.input_box.setFocus()
 
+    def handle_external_lookup(self, message: Dict[str, str]) -> None:
+        """A hand-off from `--lookup`, a second launch, or the Windows hotkey: show the window and look up."""
+        token = message.get("token", "")
+        if token:
+            # Lets Wayland compositors grant focus to this already-running window (xdg-activation).
+            os.environ["XDG_ACTIVATION_TOKEN"] = token
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if message.get("action") != "lookup":
+            return
+        text = message.get("text", "")
+        if not text and sys.platform == "win32":
+            text = QApplication.clipboard().text()  # the hotkey path; Windows allows background reads
+        text = desktop_lookup.clean_lookup_text(text)
+        if text:
+            log.info("External lookup of %d chars", len(text))
+            self._analyze_input(force_refresh=False, override_term=text)
+        else:
+            self.status_label.setText("Nothing selected: copy a word, then press the shortcut")
+
     def open_review(self) -> None:
         self.sug_popup.hide()
         self.right_drawer.hide()
@@ -2919,10 +2943,27 @@ def main() -> None:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    message = {"action": "show", "token": os.environ.get("XDG_ACTIVATION_TOKEN", "")}
+    if "--lookup" in sys.argv:
+        words = sys.argv[sys.argv.index("--lookup") + 1:]
+        message.update(action="lookup", text=" ".join(words) if words else desktop_lookup.read_selected_text())
+    if desktop_lookup.send_to_running_instance(message):
+        return  # the running Ocean takes over; never open a second window on the same data
+
     app.setStyle("Fusion")
     register_custom_fonts()
     window = MainWindow()
     window.show()
+
+    instance_server = desktop_lookup.InstanceServer(app)
+    instance_server.message_received.connect(window.handle_external_lookup)
+    instance_server.listen()
+    if sys.platform == "win32":
+        hotkey = desktop_lookup.WindowsHotkey(lambda: window.handle_external_lookup({"action": "lookup"}))
+        if hotkey.register():
+            app.installNativeEventFilter(hotkey)
+    if message["action"] == "lookup":
+        window.handle_external_lookup(message)
     exit_app(app.exec())
 
 

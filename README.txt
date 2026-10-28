@@ -28,6 +28,18 @@ EXPORT TO ANKI
   choose File > Import and pick it: notes land in the "Ocean" deck with
   Persian, IPA, definitions and examples. Importing again updates them.
 
+LOOK UP FROM ANY APP (Ctrl+Alt+O)
+  Select or copy text in any app, press Ctrl+Alt+O, and Ocean shows the lookup
+  (on GNOME Wayland it may show an "Ocean is ready" notice instead of jumping
+  to the front). Ocean runs as a single window: launching it again (or the
+  shortcut) hands the request to the open window.
+    Windows: works automatically while Ocean is running (copy first, then
+             press Ctrl+Alt+O).
+    Linux (GNOME): run ./install_shortcut_linux.sh once (--remove to undo).
+             If middle-click paste is off in GNOME, copy (Ctrl+C) first.
+    Other Linux desktops: bind any key to  <ocean folder>/run.sh --lookup
+  You can also run:  run.sh --lookup <text>
+
 YOUR DATA
   History, favourites, your translation fixes, settings and the log file (ocean.log)
   are stored per user, so updating or rebuilding the app never touches them:
