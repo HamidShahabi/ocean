@@ -116,7 +116,10 @@ class NeuralSpeaker(QObject):
         self._token += 1
         with self._play_lock:
             if HAS_WINSOUND:
-                winsound.PlaySound(None, winsound.SND_PURGE)
+                try:
+                    winsound.PlaySound(None, winsound.SND_PURGE)
+                except RuntimeError:
+                    log.debug("winsound purge failed", exc_info=True)
             player = self._player
             if player is not None and player.poll() is None:
                 player.terminate()
