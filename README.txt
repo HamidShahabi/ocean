@@ -16,6 +16,12 @@ LINUX
   ./run.sh              start the app
   ./build_linux.sh      optional portable build in dist/Ocean/
 
+REVIEW (SPACED REPETITION)
+  Words you save with the star button become flashcards. Open Review from the
+  home screen or the menu: Space shows the answer, keys 1-4 grade it
+  (Again / Hard / Good / Easy). Esc ends the session. Words come back for review
+  at growing intervals (SM-2 scheduling); un-starring a word pauses it.
+
 YOUR DATA
   History, favourites, your translation fixes, settings and the log file (ocean.log)
   are stored per user, so updating or rebuilding the app never touches them:
@@ -26,3 +32,6 @@ OFFLINE MODE
   Online dictionaries and Google Translate are used when available. Without
   internet, Persian translation falls back to the bundled NLLB-200 model in
   offline_mt_model\ (downloaded by the setup script).
+
+DEVELOPMENT
+  Run the tests:  .venv/bin/python -m unittest discover -s tests
