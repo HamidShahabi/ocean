@@ -29,6 +29,15 @@ REVIEW (SPACED REPETITION)
   (Again / Hard / Good / Easy). Esc ends the session. Words come back for review
   at growing intervals (SM-2 scheduling); un-starring a word pauses it.
 
+QUIZ
+  Open Quiz from the home screen or the menu to test yourself on your saved
+  words: ten four-choice questions, English -> Persian and Persian -> English,
+  with wrong options drawn from your other saved words. Keys 1-4 answer, Space
+  moves on, and the session ends with a score (Esc ends early). You need at
+  least four saved words with different meanings. Quiz answers do not change
+  your Review schedule: picking from four options is a much weaker signal than
+  recalling a word and grading yourself, so only Review schedules cards.
+
 HISTORY SEARCH AND SORTING
   Menu > History has a search box that filters as you type, in English or
   Persian (it matches the word and its Persian meaning; Arabic and Persian

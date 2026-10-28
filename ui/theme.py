@@ -386,6 +386,24 @@ def apply_theme(settings_data: dict) -> str:
             background-color: {c['accent_bg']};
             color: {c['accent_fg']};
         }}
+        QPushButton#QuizCorrectButton {{
+            background-color: rgba(46, 160, 67, 0.28);
+            color: {c['text_main']};
+            border: 1.5px solid #2EA043;
+            border-radius: 17px;
+            padding: 0px 16px;
+            font-size: {max(12, px - 1)}px;
+            font-weight: 700;
+        }}
+        QPushButton#QuizWrongButton {{
+            background-color: rgba(248, 81, 73, 0.24);
+            color: {c['text_main']};
+            border: 1.5px solid #F85149;
+            border-radius: 17px;
+            padding: 0px 16px;
+            font-size: {max(12, px - 1)}px;
+            font-weight: 700;
+        }}
         QPushButton#ClickableWordPill {{
             background-color: {c['bg_card']};
             color: {c['accent']};

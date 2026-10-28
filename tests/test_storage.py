@@ -104,6 +104,14 @@ class HistoryStoreTest(unittest.TestCase):
         self.assertFalse(everything[1]["is_favorite"])
         self.assertEqual([e["query_key"] for e in self.store.list_entries(favorites_only=True)], ["new", "old"])
 
+    def test_favorite_entries_returns_saved_payloads_only(self):
+        self.store.save_entry("book", {"headword": "book", "persian_equivalent": "کتاب"})
+        self.store.save_entry("tree", {"headword": "tree"})
+        self.store.toggle_favorite("book")
+        self.assertEqual(self.store.favorite_entries(), [
+            {"query_key": "book", "display_term": "book", "payload": {"headword": "book", "persian_equivalent": "کتاب"}},
+        ])
+
     def test_english_entries_with_persian_matches_any_part(self):
         self.store.save_entry("ephemeral", {"headword": "ephemeral", "persian_equivalent": f"{PASSING}، {FLEETING}"})
         self.store.save_entry("fleeting", {"headword": "fleeting", "persian_equivalent": FLEETING})
