@@ -38,9 +38,19 @@ QUIZ
   your Review schedule: picking from four options is a much weaker signal than
   recalling a word and grading yourself, so only Review schedules cards.
 
+HISTORY SEARCH AND SORTING
+  Menu > History has a search box that filters as you type, in English or
+  Persian (it matches the word and its Persian meaning; Arabic and Persian
+  letter variants such as ي/ی and ك/ک count as the same). Sort by Most Recent
+  or Most Looked Up; the search and the sort both combine with "Saved
+  Favorites Only". Each lookup you make (typing a word, picking a suggestion,
+  clicking a history row or candidate, the Ctrl+Alt+O hotkey) adds one to that
+  word's counter, shown as x2, x3... beside it; existing history starts at 1.
+  Refresh, Deep search, back/forward and re-showing a result do not count.
+
 EXPORT TO ANKI
   Menu > History > Export to Anki writes the listed entries (all searches, or
-  saved words only, following the filter) to a text file. In Anki (2.1.55+)
+  saved words only, narrowed by any search text) to a text file. In Anki (2.1.55+)
   choose File > Import and pick it: notes land in the "Ocean" deck with
   Persian, IPA, definitions and examples. Importing again updates them.
 

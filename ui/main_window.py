@@ -471,6 +471,9 @@ class MainWindow(QMainWindow):
 
         self._switch_to_results_view()
 
+        if not force_refresh and not deep_mode and not self._navigating_history:
+            # A user-initiated lookup (cached or fresh) counts once; refreshes and back/forward do not.
+            self.db.record_lookup(term)
         if not force_refresh and not deep_mode:
             cached = self.db.get_entry(term)
             if cached and (cached.get("senses") or cached.get("is_sentence")):
