@@ -15,7 +15,7 @@ class LookupContext:
     deep_mode: bool = False
     root_lemma: str = ""
     offline: bool = False         # when set, sources that need the network are skipped
-    requester: Optional[Callable[..., Any]] = None  # replaces smart_request (tests, a per-lookup cache)
+    requester: Optional[Callable[..., Any]] = None  # replaces smart_request (tests); the per-lookup cache lives in smart_request
 
     def __post_init__(self) -> None:
         if not self.root_lemma:
@@ -147,5 +147,5 @@ class SourceRegistry:
         # Dependencies are submitted first, so a waiting task never starves the one it waits for.
         with ThreadPoolExecutor(max_workers=len(active)) as pool:
             for source in active:
-                futures[source.name] = pool.submit(task, source)
+                futures[source.name] = le.submit_in_context(pool, task, source)
             return merge_entries(futures[s.name].result() for s in active)
