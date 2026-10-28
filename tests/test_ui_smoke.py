@@ -13,10 +13,11 @@ os.environ["XDG_DATA_HOME"] = _DATA
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from PyQt6.QtCore import Qt  # noqa: E402
+from PyQt6.QtCore import QObject, Qt, pyqtSignal  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
+import lexical_engine  # noqa: E402
 from ui import theme  # noqa: E402
 from ui.config import DB_FILE  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_SETTINGS, PAGE_TEACH  # noqa: E402
@@ -57,6 +58,16 @@ IDIOM = {
     "persian_equivalent": "یخ را شکستن",
     "senses": [{"pos": "Idiom", "def": "Start a conversation."}],
 }
+
+
+class FakeWorker(QObject):
+    """Stands in for EngineWorker so a lookup never touches the network."""
+    finished_success = pyqtSignal(str, dict)
+    finished_error = pyqtSignal(str)
+
+    def __init__(self, term, deep_mode=False):
+        super().__init__()
+        self.term = term
 
 
 def card_texts(win):
@@ -303,6 +314,69 @@ class UiSmokeTest(unittest.TestCase):
         self.win.results_page.render("serendipity", WORD)
         buttons = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
         self.assertIn("Reveal Persian Translation", buttons)
+
+    def _make_stale(self, term="serendipity"):
+        with self.win.db._conn() as conn:
+            conn.execute("UPDATE lexicon SET produced_at = '2000-01-01T00:00:00', engine_version = 0 WHERE query_key = ?", (term,))
+
+    def _lookup_stale(self, term="serendipity"):
+        self._make_stale(term)
+        with mock.patch("ui.main_window.EngineWorker", FakeWorker), mock.patch("ui.main_window.start_worker"):
+            self.win._analyze_input(override_term=term)
+        return self.win.worker
+
+    def test_stale_entry_is_fetched_again_and_replaced(self):
+        worker = self._lookup_stale()
+        self.assertIsInstance(worker, FakeWorker)  # not served from the saved copy
+        fresh = dict(WORD, persian_equivalent="شانس خوب")
+        worker.finished_success.emit("serendipity", fresh)
+        saved = self.win.db.get_entry("serendipity")
+        self.assertEqual(saved["persian_equivalent"], "شانس خوب")
+        self.assertEqual(saved["_engine_version"], lexical_engine.ENGINE_VERSION)
+        self.assertEqual(self.win.current_data["persian_equivalent"], "شانس خوب")
+
+    def test_stale_entry_is_shown_when_the_refetch_fails_or_is_empty(self):
+        for outcome in ("error", "empty"):
+            worker = self._lookup_stale()
+            if outcome == "error":
+                worker.finished_error.emit("no network")
+            else:
+                worker.finished_success.emit("serendipity", {"headword": "serendipity", "senses": [],
+                                                             "persian_equivalent": lexical_engine.NOT_FOUND_FA})
+            self.assertEqual(self.win.current_data["persian_equivalent"], WORD["persian_equivalent"], outcome)
+            self.assertIn("Finding something good by chance.", " ".join(card_texts(self.win)))
+            self.assertIn("saved copy", self.win.status_label.text())
+            self.assertEqual(self.win.db.get_entry("serendipity")["_engine_version"], 0)  # still stale: retried next time
+            self.assertTrue(self.win.explore_btn.isEnabled())
+
+    def test_refresh_keeps_favourite_and_manual_persian_edit(self):
+        self.win.db.toggle_favorite("serendipity")
+        worker = self._lookup_stale()
+        fresh = dict(WORD, persian_equivalent="شانس خوب", senses=[dict(WORD["senses"][0], example_fa="ماشینی")])
+        with mock.patch.dict(lexical_engine.USER_MEMORY["overrides"], {"it was serendipity that we met.": "ویرایش من"}):
+            worker.finished_success.emit("serendipity", fresh)
+        saved = self.win.db.get_entry("serendipity")
+        self.assertTrue(saved["_is_favorite"])
+        self.assertEqual(saved["senses"][0]["example_fa"], "ویرایش من")
+
+    def test_no_refresh_when_period_is_never_or_offline_mode_is_on(self):
+        self._make_stale()
+        for key, val in (("refresh_period", "Never"), ("offline_only", True)):
+            with mock.patch.dict(self.win.settings.data, {key: val}), \
+                    mock.patch("ui.main_window.EngineWorker", FakeWorker), mock.patch("ui.main_window.start_worker"):
+                self.win.worker = None
+                self.win._analyze_input(override_term="serendipity")
+            self.assertIsNone(self.win.worker, key)
+            self.assertEqual(self.win.current_term, "serendipity")
+
+    def test_settings_page_saves_the_refresh_period(self):
+        page = self.win.right_drawer.settings_page
+        self.assertEqual(page.refresh_drop.currentText(), "3 months")
+        page.refresh_drop.current_val = "1 week"
+        with mock.patch.object(self.win.settings, "save"):
+            page._apply_live()
+        self.assertEqual(self.win.settings.data["refresh_period"], "1 week")
+        self.win.settings.data["refresh_period"] = "3 months"
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
-"""Drawer page with the theme, font size, learning mode and voice settings."""
+"""Drawer page with the theme, font size, learning mode, voice and refresh-period settings."""
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QFormLayout, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
+from storage import DEFAULT_REFRESH_PERIOD, REFRESH_PERIOD_DAYS
 from ui.config import SPEED_OPTIONS, VOICE_OPTIONS
 from ui.theme import VectorIcons
 from ui.widgets import ModernGlassDropdown
@@ -48,6 +49,12 @@ class SettingsPage(QWidget):
         rate_label = next((s for s in SPEED_OPTIONS if s.startswith(f"{cur_rate:+d}" if cur_rate != 0 else "0")), "0 (Normal 1.0x)")
         self.speed_drop = ModernGlassDropdown(SPEED_OPTIONS, rate_label, self)
         form.addRow("Speech Speed:", self.speed_drop)
+
+        cur_refresh = self.main_win.settings.data.get("refresh_period", DEFAULT_REFRESH_PERIOD)
+        if cur_refresh not in REFRESH_PERIOD_DAYS:
+            cur_refresh = DEFAULT_REFRESH_PERIOD
+        self.refresh_drop = ModernGlassDropdown(list(REFRESH_PERIOD_DAYS), cur_refresh, self)
+        form.addRow("Refresh Saved Entries:", self.refresh_drop)
 
         s_lay.addLayout(form)
 
@@ -103,6 +110,7 @@ class SettingsPage(QWidget):
         self.main_win.settings.data["base_font_px"] = scale_map.get(sel, 14)
         self.main_win.settings.data["learning_mode"] = self.mode_drop.currentText()
         self.main_win.settings.data["voice_id"] = self.voice_drop.currentText()
+        self.main_win.settings.data["refresh_period"] = self.refresh_drop.currentText()
         sp_txt = self.speed_drop.currentText().split()[0]
         try:
             self.main_win.settings.data["speech_rate"] = int(sp_txt)
