@@ -1,6 +1,7 @@
 # === SECTION 1: IMPORTS & ENVIRONMENT SETUP ===
 import io
 import os
+import html
 import re
 import sys
 import json
@@ -10,13 +11,16 @@ import shutil
 import sqlite3
 import subprocess
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lexical_engine
-from PyQt6.QtCore import Qt, QThread, QDeadlineTimer, pyqtSignal, QBuffer, QIODevice, QTimer, QPoint, QRectF, QSize, QEvent, QObject
+import review
+import anki_export
+import desktop_lookup
+from PyQt6.QtCore import Qt, QThread, QDeadlineTimer, QStandardPaths, pyqtSignal, QBuffer, QIODevice, QTimer, QPoint, QRectF, QSize, QEvent, QObject
 from PyQt6.QtGui import (
     QFont,
     QFontDatabase,
@@ -51,6 +55,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QSizePolicy,
     QDialog,
+    QFileDialog,
 )
 
 try:
@@ -100,6 +105,9 @@ DB_FILE = lexical_engine.user_data_path("lexicon_vault.db")
 SETTINGS_FILE = lexical_engine.user_data_path("ocean_settings.json")
 
 EN_FONT_FAMILY = "Inter"
+# Qt swaps Left/Right for right-to-left text unless AlignAbsolute is set, so plain AlignRight
+# renders Persian flush left.
+PERSIAN_ALIGNMENT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute | Qt.AlignmentFlag.AlignVCenter
 FA_FONT_FAMILY = "Vazirmatn"
 
 VOICE_OPTIONS = [
@@ -308,7 +316,9 @@ class NeuralSpeaker:
         self.settings = settings
         self._kokoro: Optional[Any] = None
         self._player: Optional[subprocess.Popen] = None
-        threading.Thread(target=self._init_kokoro, daemon=True).start()
+        # Not a daemon: quitting while onnxruntime is mid-load (~1s after start) crashes the process,
+        # so let interpreter shutdown wait for the load to finish.
+        threading.Thread(target=self._init_kokoro).start()
 
     def _find_model_files(self) -> tuple[str, str]:
         candidates = [
@@ -869,10 +879,10 @@ class PersianTranslationWidget(QWidget):
         self.label = QLabel()
         self.label.setProperty("is_persian_widget", True)
         self.label.setProperty("persian_owner", self)
-        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setTextFormat(Qt.TextFormat.PlainText)
         self.label.setWordWrap(True)
         self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.label.setAlignment(PERSIAN_ALIGNMENT)
         self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.label.setFont(make_polished_font(FA_FONT_FAMILY, font_px + (2 if large else 0), bold=large))
         self.label.setObjectName("PersianText")
@@ -882,17 +892,12 @@ class PersianTranslationWidget(QWidget):
         layout.addWidget(self.edit_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.label, 1)
 
-        self._set_persian_html(self.real_text)
+        self._set_persian_text(self.real_text)
         self._sync_visibility()
 
-    def _set_persian_html(self, fa_str: str) -> None:
+    def _set_persian_text(self, fa_str: str) -> None:
         self.real_text = fa_str.strip() or "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f"
-        escaped_fa = (
-            self.real_text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-        self.label.setText(f"<div dir='rtl' align='right' style='text-align:right;'>{escaped_fa}</div>")
+        self.label.setText(self.real_text)
 
     def _is_missing_translation(self) -> bool:
         return "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" in self.real_text or not self.real_text.strip()
@@ -933,7 +938,7 @@ class PersianTranslationWidget(QWidget):
                 self._apply_new_persian(new_txt)
 
     def _apply_new_persian(self, new_fa: str) -> None:
-        self._set_persian_html(new_fa)
+        self._set_persian_text(new_fa)
         self._sync_visibility()
         if self.main_win and self.main_win.current_term and self.main_win.current_data:
             d = self.main_win.current_data
@@ -1038,6 +1043,14 @@ class AttachedRightDrawer(SmoothGlassFrame):
         m_lay.setContentsMargins(0, 8, 0, 0)
         m_lay.setSpacing(10)
 
+        self.review_menu_btn = QPushButton("Review")
+        self.review_menu_btn.setObjectName("DrawerMenuItem")
+        self.review_menu_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.review_menu_btn.setFixedHeight(46)
+        self.review_menu_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.review_menu_btn.clicked.connect(lambda: self.main_win.open_review())
+        m_lay.addWidget(self.review_menu_btn)
+
         btn_hist = QPushButton("History")
         btn_hist.setObjectName("DrawerMenuItem")
         btn_hist.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1091,7 +1104,20 @@ class AttachedRightDrawer(SmoothGlassFrame):
         del_btn.setFixedHeight(36)
         del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         del_btn.clicked.connect(self._delete_hist_item)
-        h_lay.addWidget(del_btn)
+
+        export_btn = QPushButton("Export to Anki")
+        export_btn.setObjectName("GlassPillButton")
+        export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        export_btn.setFixedHeight(36)
+        export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        export_btn.setToolTip("Export the entries listed above as an Anki import file")
+        export_btn.clicked.connect(self._export_anki)
+
+        hist_btns = QHBoxLayout()
+        hist_btns.setSpacing(10)
+        hist_btns.addWidget(del_btn, stretch=1)
+        hist_btns.addWidget(export_btn, stretch=1)
+        h_lay.addLayout(hist_btns)
         self.stack.addWidget(page_hist)
 
         # PAGE 2: Settings View (Removed Gemini AI Key as requested in Image 4)
@@ -1325,6 +1351,7 @@ class AttachedRightDrawer(SmoothGlassFrame):
 
     def _on_row_star_toggled(self, key: str, row_widget: Optional[HistoryItemRowWidget] = None) -> None:
         new_state = self.main_win.db.toggle_favorite(key)
+        self.main_win.refresh_review_badges()
         fav_only = "Saved" in self.filter_drop.currentText()
         if fav_only and not new_state:
             scroll_pos = self.hist_list.verticalScrollBar().value()
@@ -1348,7 +1375,34 @@ class AttachedRightDrawer(SmoothGlassFrame):
             key = item.data(Qt.ItemDataRole.UserRole)
             if key:
                 self.main_win.db.delete_entry(key)
+                self.main_win.refresh_review_badges()
                 self.populate_history()
+
+    def _export_anki(self) -> None:
+        fav_only = "Saved" in self.filter_drop.currentText()
+        db = self.main_win.db
+        payloads = [p for p in (db.get_entry(e["query_key"]) for e in db.list_entries(favorites_only=fav_only)) if p]
+        if not payloads:
+            QMessageBox.information(self, "Ocean Notice", "Nothing to export yet.")
+            return
+        docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or os.path.expanduser("~")
+        path, _ = QFileDialog.getSaveFileName(self, "Export to Anki", os.path.join(docs, "Ocean-anki.txt"), "Text files (*.txt)")
+        if not path:
+            return
+        text, count = anki_export.build_anki_tsv(payloads)
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        except OSError as exc:
+            log.exception("Anki export to %s failed", path)
+            QMessageBox.warning(self, "Ocean Notice", f"Could not write the export file:\n{exc}")
+            return
+        QMessageBox.information(
+            self, "Ocean",
+            f"Exported {count} notes to:\n{path}\n\n"
+            f"In Anki choose File \u2192 Import and pick this file. Notes go into the "
+            f"\u201c{anki_export.DECK_NAME}\u201d deck; importing again later updates them.",
+        )
 
     def _collect_settings(self) -> None:
         scale_map = {
@@ -1386,6 +1440,216 @@ class AttachedRightDrawer(SmoothGlassFrame):
 
 
 # === SECTION 8: MAIN APPLICATION WINDOW ===
+class ReviewPage(QWidget):
+    """Flashcard review of favourited entries, scheduled by spaced repetition (see review.py)."""
+
+    def __init__(self, main_win: "MainWindow") -> None:
+        super().__init__()
+        self.main_win = main_win
+        self.store = review.ReviewStore(DB_FILE)
+        self.queue: List[review.ReviewCard] = []
+        self.done_count = 0
+        self.revealed = False
+        self.setObjectName("ReviewPage")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 42)
+        outer.addStretch(1)
+
+        self.card = SmoothGlassFrame(radius=22, variant="card")
+        self.card.setMinimumWidth(560)
+        self.card.setMaximumWidth(760)
+        vbox = QVBoxLayout(self.card)
+        vbox.setContentsMargins(32, 24, 32, 26)
+        vbox.setSpacing(14)
+
+        header = QHBoxLayout()
+        title = QLabel("Review")
+        title.setObjectName("CardTitle")
+        header.addWidget(title)
+        header.addStretch()
+        self.progress_label = QLabel("")
+        self.progress_label.setObjectName("MutedText")
+        header.addWidget(self.progress_label)
+        end_btn = QPushButton("End")
+        end_btn.setObjectName("GlassPillButton")
+        end_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        end_btn.setFixedHeight(34)
+        end_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        end_btn.setToolTip("End review (Esc)")
+        end_btn.clicked.connect(self.main_win.go_home)
+        header.addWidget(end_btn)
+        vbox.addLayout(header)
+
+        self.front_row = QHBoxLayout()
+        self.front_row.setSpacing(12)
+        self.term_label = QLabel("")
+        self.term_label.setObjectName("HeadwordTitle")
+        self.term_label.setWordWrap(True)
+        self.front_row.addWidget(self.term_label, stretch=1)
+        self.audio_btn: Optional[QPushButton] = None
+        vbox.addLayout(self.front_row)
+
+        self.ipa_label = QLabel("")
+        self.ipa_label.setObjectName("IpaText")
+        vbox.addWidget(self.ipa_label)
+
+        self.answer_box = QWidget()
+        ans = QVBoxLayout(self.answer_box)
+        ans.setContentsMargins(0, 6, 0, 0)
+        ans.setSpacing(10)
+        self.fa_label = QLabel("")
+        self.fa_label.setObjectName("PersianText")
+        self.fa_label.setWordWrap(True)
+        self.fa_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.fa_label.setAlignment(PERSIAN_ALIGNMENT)
+        ans.addWidget(self.fa_label)
+        self.def_label = QLabel("")
+        self.def_label.setObjectName("BodyText")
+        self.def_label.setWordWrap(True)
+        self.def_label.setTextFormat(Qt.TextFormat.RichText)
+        ans.addWidget(self.def_label)
+        vbox.addWidget(self.answer_box)
+
+        self.show_btn = QPushButton("Show answer   (Space)")
+        self.show_btn.setObjectName("PrimaryPillButton")
+        self.show_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.show_btn.setFixedHeight(40)
+        self.show_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.show_btn.clicked.connect(self.reveal)
+        vbox.addWidget(self.show_btn)
+
+        self.grade_row = QWidget()
+        g_lay = QHBoxLayout(self.grade_row)
+        g_lay.setContentsMargins(0, 0, 0, 0)
+        g_lay.setSpacing(10)
+        self.grade_btns: Dict[review.Grade, QPushButton] = {}
+        for grade in review.Grade:
+            btn = QPushButton()
+            btn.setObjectName("PrimaryPillButton" if grade == review.Grade.GOOD else "GlassPillButton")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setFixedHeight(40)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.clicked.connect(lambda _, g=grade: self.grade(g))
+            g_lay.addWidget(btn, stretch=1)
+            self.grade_btns[grade] = btn
+        vbox.addWidget(self.grade_row)
+
+        self.done_label = QLabel("")
+        self.done_label.setObjectName("BodyText")
+        self.done_label.setWordWrap(True)
+        self.done_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vbox.addWidget(self.done_label)
+
+        outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(1)
+
+        bindings = [("Space", self.reveal), ("Return", self.reveal), ("Esc", self.main_win.go_home)]
+        bindings += [(str(int(g)), lambda g=g: self.grade(g)) for g in review.Grade]
+        for keys, slot in bindings:
+            sc = QShortcut(QKeySequence(keys), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(slot)
+
+    def start(self) -> None:
+        try:
+            self.queue = self.store.due_cards(datetime.now())
+        except Exception:
+            log.exception("Could not load review cards")
+            self.queue = []
+        self.done_count = 0
+        self._show_current()
+
+    def _show_current(self) -> None:
+        self.revealed = False
+        self.answer_box.hide()
+        self.grade_row.hide()
+        if self.audio_btn is not None:
+            self.audio_btn.deleteLater()
+            self.audio_btn = None
+
+        if not self.queue:
+            self._show_done()
+            return
+
+        card = self.queue[0]
+        self.progress_label.setText(f"{self.done_count} done · {len(self.queue)} left")
+        self.term_label.setText(card.payload.get("headword") or card.display_term)
+        ipa = card.payload.get("ipa_us", "")
+        self.ipa_label.setText(ipa)
+        self.ipa_label.setVisible(bool(ipa) and not card.payload.get("is_sentence"))
+        self.audio_btn = self.main_win._create_audio_button(self.term_label.text())
+        self.front_row.addWidget(self.audio_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        self.show_btn.show()
+        self.done_label.hide()
+
+        self.fa_label.setText(card.payload.get("persian_equivalent", ""))
+        # The Persian meaning is the answer: larger than the theme's body size.
+        self.fa_label.setStyleSheet(f"font-size: {int(self.main_win.settings.data.get('base_font_px', 14)) + 8}px;")
+        parts = []
+        for sense in card.payload.get("senses", [])[:2]:
+            pos = html.escape(sense.get("pos", ""))
+            line = f"<b>{pos}</b> — {html.escape(sense.get('def', ''))}" if pos else html.escape(sense.get("def", ""))
+            if sense.get("example_en"):
+                line += f"<br><i>{html.escape(sense['example_en'])}</i>"
+            parts.append(line)
+        self.def_label.setText("<br><br>".join(parts))
+        self.def_label.setVisible(bool(parts))
+
+    def _show_done(self) -> None:
+        self.progress_label.setText(f"{self.done_count} done" if self.done_count else "")
+        self.term_label.setText("All caught up" if self.done_count else "Nothing to review")
+        self.ipa_label.hide()
+        self.show_btn.hide()
+        try:
+            next_due = self.store.next_due()
+        except Exception:
+            log.exception("Could not read next review time")
+            next_due = None
+        if next_due is not None:
+            wait = review.format_delay(max(next_due - datetime.now(), timedelta(minutes=1)))
+            msg = f"Next review in {wait}."
+        else:
+            msg = "Save words with ☆ Save on a result card to add them to your review deck."
+        self.done_label.setText(msg)
+        self.done_label.show()
+
+    def reveal(self) -> None:
+        if not self.queue or self.revealed:
+            return
+        self.revealed = True
+        self.answer_box.show()
+        self.show_btn.hide()
+        state, now = self.queue[0].state, datetime.now()
+        names = {review.Grade.AGAIN: "Again", review.Grade.HARD: "Hard", review.Grade.GOOD: "Good", review.Grade.EASY: "Easy"}
+        for grade, btn in self.grade_btns.items():
+            delay = review.format_delay(review.schedule(state, grade, now).due - now)
+            btn.setText(f"{names[grade]} · {delay}")
+            btn.setToolTip(f"{names[grade]} (key {int(grade)})")
+        self.grade_row.show()
+
+    def grade(self, grade: review.Grade) -> None:
+        if not self.queue or not self.revealed:
+            return
+        card, now = self.queue[0], datetime.now()
+        new_state = review.schedule(card.state, grade, now)
+        try:
+            self.store.save_state(card.query_key, new_state, now)
+        except Exception:
+            log.exception("Could not save review of %r", card.query_key)
+            QMessageBox.warning(self, "Ocean Notice", "Could not save this review. Please try again.")
+            return
+        self.queue.pop(0)
+        if grade == review.Grade.AGAIN:
+            card.state = new_state
+            self.queue.append(card)  # relearn: show it again before the session ends
+        else:
+            self.done_count += 1
+        self.main_win.refresh_review_badges()
+        self._show_current()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1410,6 +1674,12 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._apply_theme()
+        self.refresh_review_badges()
+        # Cards fall due while the app stays open (e.g. 10 minutes after "Again").
+        self.review_badge_timer = QTimer(self)
+        self.review_badge_timer.setInterval(60_000)
+        self.review_badge_timer.timeout.connect(self.refresh_review_badges)
+        self.review_badge_timer.start()
 
         QApplication.instance().installEventFilter(self)
 
@@ -1612,6 +1882,15 @@ class MainWindow(QMainWindow):
 
         sb_wrap_lay.addWidget(self.search_card)
         self.home_vbox.addWidget(self.search_bar_wrapper, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.home_review_btn = QPushButton("")
+        self.home_review_btn.setObjectName("GlassPillButton")
+        self.home_review_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.home_review_btn.setFixedHeight(36)
+        self.home_review_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.home_review_btn.setToolTip("Review your saved words (spaced repetition)")
+        self.home_review_btn.clicked.connect(self.open_review)
+        self.home_vbox.addWidget(self.home_review_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
         self.home_vbox.addStretch(1)
 
         self.stack.addWidget(self.home_page)
@@ -1643,6 +1922,10 @@ class MainWindow(QMainWindow):
         res_vbox.addWidget(self.scroll_area, stretch=1)
 
         self.stack.addWidget(self.results_page)
+
+        # VIEW 2: Spaced-repetition review
+        self.review_page = ReviewPage(self)
+        self.stack.addWidget(self.review_page)
 
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)
@@ -1704,7 +1987,49 @@ class MainWindow(QMainWindow):
         self.home_vbox.insertWidget(2, self.search_bar_wrapper, alignment=Qt.AlignmentFlag.AlignHCenter)
         self.stack.setCurrentIndex(0)
         self._update_search_button_mode()
+        self.refresh_review_badges()
         self.input_box.setFocus()
+
+    def handle_external_lookup(self, message: Dict[str, str]) -> None:
+        """A hand-off from `--lookup`, a second launch, or the Windows hotkey: show the window and look up."""
+        token = message.get("token", "")
+        if token:
+            # Lets Wayland compositors grant focus to this already-running window (xdg-activation).
+            os.environ["XDG_ACTIVATION_TOKEN"] = token
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if message.get("action") != "lookup":
+            return
+        text = message.get("text", "")
+        if not text and sys.platform == "win32":
+            text = QApplication.clipboard().text()  # the hotkey path; Windows allows background reads
+        text = desktop_lookup.clean_lookup_text(text)
+        if text:
+            log.info("External lookup of %d chars", len(text))
+            self._analyze_input(force_refresh=False, override_term=text)
+        else:
+            self.status_label.setText("Nothing selected: copy a word, then press the shortcut")
+
+    def open_review(self) -> None:
+        self.sug_popup.hide()
+        self.right_drawer.hide()
+        self.status_label.setText("")
+        self.review_page.start()
+        self.stack.setCurrentIndex(2)
+        self.review_page.setFocus()
+
+    def refresh_review_badges(self) -> None:
+        try:
+            due = self.review_page.store.due_count(datetime.now())
+        except Exception:
+            log.exception("Could not count due reviews")
+            due = 0
+        self.home_review_btn.setText(f"Review · {due} due")
+        self.home_review_btn.setVisible(due > 0)
+        self.right_drawer.review_menu_btn.setText(f"Review ({due} due)" if due else "Review")
 
     def _switch_to_results_view(self) -> None:
         if self.stack.currentIndex() != 1:
@@ -1970,6 +2295,7 @@ class MainWindow(QMainWindow):
         def _toggle_fav() -> None:
             new_state = self.db.toggle_favorite(query_term)
             fav_btn.setText("\u2605 Saved" if new_state else "\u2606 Save")
+            self.refresh_review_badges()
             if self.right_drawer.isVisible() and self.right_drawer.stack.currentIndex() == 1:
                 self.right_drawer.populate_history()
 
@@ -2617,10 +2943,27 @@ def main() -> None:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    message = {"action": "show", "token": os.environ.get("XDG_ACTIVATION_TOKEN", "")}
+    if "--lookup" in sys.argv:
+        words = sys.argv[sys.argv.index("--lookup") + 1:]
+        message.update(action="lookup", text=" ".join(words) if words else desktop_lookup.read_selected_text())
+    if desktop_lookup.send_to_running_instance(message):
+        return  # the running Ocean takes over; never open a second window on the same data
+
     app.setStyle("Fusion")
     register_custom_fonts()
     window = MainWindow()
     window.show()
+
+    instance_server = desktop_lookup.InstanceServer(app)
+    instance_server.message_received.connect(window.handle_external_lookup)
+    instance_server.listen()
+    if sys.platform == "win32":
+        hotkey = desktop_lookup.WindowsHotkey(lambda: window.handle_external_lookup({"action": "lookup"}))
+        if hotkey.register():
+            app.installNativeEventFilter(hotkey)
+    if message["action"] == "lookup":
+        window.handle_external_lookup(message)
     exit_app(app.exec())
 
 
