@@ -445,6 +445,9 @@ class MainWindow(QMainWindow):
 
         self._switch_to_results_view()
 
+        if not force_refresh and not deep_mode and not self._navigating_history:
+            # A user-initiated lookup (cached or fresh) counts once; refreshes and back/forward do not.
+            self.db.record_lookup(term)
         self._stale_copy = None
         if not force_refresh and not deep_mode:
             cached = self.db.get_entry(term)
@@ -477,7 +480,7 @@ class MainWindow(QMainWindow):
     def _should_refresh(self, cached: Dict[str, Any]) -> bool:
         """A saved entry older than the Settings refresh period (or from an older engine) is fetched again,
         unless offline-only mode is on."""
-        if self.settings.data.get("offline_mode"):
+        if self.settings.data.get("offline_only"):
             return False
         days = storage.refresh_period_days(self.settings.data.get("refresh_period"))
         return self.db.is_entry_stale(cached, days)

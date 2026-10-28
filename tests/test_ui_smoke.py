@@ -10,7 +10,8 @@ os.environ["XDG_DATA_HOME"] = _DATA
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from PyQt6.QtCore import QObject, pyqtSignal  # noqa: E402
+from PyQt6.QtCore import QObject, Qt, pyqtSignal  # noqa: E402
+from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
 import lexical_engine  # noqa: E402
@@ -143,6 +144,67 @@ class UiSmokeTest(unittest.TestCase):
         drawer.history_page._on_row_star_toggled(key, row)
         self.assertFalse(self.win.db.get_entry(key)["_is_favorite"])
 
+    def _count(self, term):
+        return next(e["lookup_count"] for e in self.win.db.list_entries() if e["query_key"] == term)
+
+    def test_lookups_are_counted_but_refresh_rerender_and_navigation_are_not(self):
+        self.assertEqual(self._count("serendipity"), 1)
+        self.win._analyze_input(override_term="serendipity")  # served from the history cache
+        self.assertEqual(self._count("serendipity"), 2)
+        self.win.results_page.render("serendipity", self.win.current_data)  # re-render
+        self.win.right_drawer.settings_page.theme_drop.setCurrentText("Dark Mode")
+        with mock.patch("ui.main_window.start_worker"):
+            self.win._analyze_input(force_refresh=True)  # Refresh button
+            self.win._analyze_input(force_refresh=True, deep_mode=True)  # Deep search
+        self.assertEqual(self._count("serendipity"), 2)
+        self.win._analyze_input(override_term="break the ice")
+        self.win._go_back()  # back/forward re-show an entry, they are not new lookups
+        self.win._go_forward()
+        self.assertEqual(self._count("serendipity"), 2)
+        self.assertEqual(self._count("break the ice"), 2)
+
+    def test_history_search_sort_and_saved_filter(self):
+        drawer = self.win.right_drawer
+        drawer.show_page(PAGE_HISTORY)
+        page = drawer.history_page
+
+        def shown():
+            return [page.hist_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(page.hist_list.count())]
+
+        everything = shown()
+        self.assertGreaterEqual(len(everything), 4)
+        # Typing filters after a short pause, in English and in Persian.
+        page.search_box.setText("serend")
+        QTest.qWait(300)
+        self.assertEqual(shown(), ["serendipity"])
+        page.search_box.setText("اتفاق خوشایند")
+        QTest.qWait(300)
+        self.assertEqual(shown(), ["serendipity"])
+        page.search_box.setText("كتاب")  # Arabic kaf spelling of the Persian headword
+        QTest.qWait(300)
+        # The Persian headword, and the sentence whose Persian meaning contains it.
+        self.assertEqual(shown(), ["کتاب", "she found the book by pure chance yesterday"])
+        page.search_box.setText("")
+        QTest.qWait(300)
+        self.assertEqual(shown(), everything)
+        # Sort by lookups, then combine with the Saved filter and search.
+        for _ in range(3):
+            self.win.db.record_lookup("break the ice")
+        page.sort_drop._on_picked("Most Looked Up")
+        self.assertEqual(shown()[0], "break the ice")
+        self.assertEqual(page.hist_list.itemWidget(page.hist_list.item(0)).count_lbl.text(), "×4")
+        self.win.db.toggle_favorite("serendipity")
+        page.filter_drop._on_picked("Saved Favorites Only")
+        self.assertEqual(shown(), ["serendipity"])
+        page.search_box.setText("ice")
+        page.populate()
+        self.assertEqual(shown(), [])
+        page.search_box.setText("serend")
+        page.populate()
+        self.assertEqual(shown(), ["serendipity"])
+        page.filter_drop._on_picked("All Recent Searches")
+        page.sort_drop._on_picked("Most Recent")
+
     def test_anki_export_from_history(self):
         drawer = self.win.right_drawer
         drawer.show_page(PAGE_HISTORY)
@@ -230,7 +292,7 @@ class UiSmokeTest(unittest.TestCase):
 
     def test_no_refresh_when_period_is_never_or_offline_mode_is_on(self):
         self._make_stale()
-        for key, val in (("refresh_period", "Never"), ("offline_mode", True)):
+        for key, val in (("refresh_period", "Never"), ("offline_only", True)):
             with mock.patch.dict(self.win.settings.data, {key: val}), \
                     mock.patch("ui.main_window.EngineWorker", FakeWorker), mock.patch("ui.main_window.start_worker"):
                 self.win.worker = None
