@@ -12,7 +12,7 @@ for f in lexicon_vault.db user_memory.json; do
     fi
 done
 
-uv pip install --python .venv/bin/python pyinstaller
+uv pip install --python .venv/bin/python -r requirements.lock   # includes the pinned pyinstaller
 
 collect=()
 for pkg in kokoro_onnx espeakng_loader phonemizer segments language_tags eng_to_ipa ctranslate2 sentencepiece; do
