@@ -1,9 +1,11 @@
-"""Drawer page with the theme, font size, learning mode, voice and refresh-period settings."""
-from typing import TYPE_CHECKING
+"""Drawer page with the theme, font size, learning mode, voice, refresh-period and dictionary-source settings."""
+from typing import Dict, TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import QFormLayout, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QCheckBox, QFormLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+
+from dictionary_sources import REGISTRY
 
 from storage import DEFAULT_REFRESH_PERIOD, REFRESH_PERIOD_DAYS
 from ui.config import SPEED_OPTIONS, VOICE_OPTIONS
@@ -66,6 +68,8 @@ class SettingsPage(QWidget):
         self.test_voice_btn.clicked.connect(self._test_voice)
         s_lay.addWidget(self.test_voice_btn)
 
+        self._build_sources_group(s_lay)
+
         s_lay.addStretch()
 
         action_row = QHBoxLayout()
@@ -90,8 +94,29 @@ class SettingsPage(QWidget):
         s_lay.addLayout(action_row)
 
 
+    def _build_sources_group(self, parent_layout: QVBoxLayout) -> None:
+        """The "Dictionary sources" group: one checkbox per registered source, bundled ones included
+        (switching off a local source is as legitimate as switching off a slow site)."""
+        title = QLabel("Dictionary sources")
+        title.setObjectName("CardTitle")
+        parent_layout.addWidget(title)
+        hint = QLabel("Turn off a source that is broken, slow or unwanted. It is not contacted or read "
+                      "for any lookup. Click Apply or Save to use the change.")
+        hint.setObjectName("MutedText")
+        hint.setWordWrap(True)
+        parent_layout.addWidget(hint)
+        self.source_checks: Dict[str, QCheckBox] = {}
+        for source in REGISTRY.all():
+            text = source.label if source.needs_network else f"{source.label} (bundled)"
+            box = QCheckBox(text)
+            box.setChecked(REGISTRY.is_enabled(source.name))
+            self.source_checks[source.name] = box
+            parent_layout.addWidget(box)
+
     def on_show(self) -> None:
         self.theme_drop.setCurrentText(self.main_win.settings.data.get("theme", "Dark Mode"))
+        for name, box in self.source_checks.items():  # discard unsaved ticks from an earlier visit
+            box.setChecked(REGISTRY.is_enabled(name))
 
     def apply_icons(self, accent: str) -> None:
         self.test_voice_btn.setIcon(VectorIcons.speaker_icon(accent))
@@ -117,12 +142,18 @@ class SettingsPage(QWidget):
         except Exception:
             self.main_win.settings.data["speech_rate"] = 0
 
+    def _collect_sources(self) -> None:
+        """Store the ticked sources in the settings and switch the registry to match."""
+        self.main_win.settings.data["disabled_sources"] = [n for n, box in self.source_checks.items() if not box.isChecked()]
+        self.main_win.settings.apply_sources()
+
     def _test_voice(self) -> None:
         self._collect_settings()
         self.main_win.speaker.speak("Hello, welcome to Ocean.")
 
     def _apply_live(self) -> None:
         self._collect_settings()
+        self._collect_sources()
         self.main_win.settings.save()
         self.main_win._apply_theme()
         if self.main_win.current_term and self.main_win.current_data:

@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import dictionary_sources
 import lexical_engine
 from ui.highlight import ExampleHighlighter
 from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS
@@ -264,6 +265,17 @@ class ResultsPage(QWidget):
         self.cards_layout.addWidget(card)
         self.cards_layout.addStretch()
 
+    def _add_all_sources_off_notice(self) -> None:
+        """Explain the empty definitions when every dictionary source is switched off in Settings
+        (a separate case from offline-only mode, which leaves the bundled sources on)."""
+        card, vbox, _ = self._create_glass_card("All dictionary sources are turned off")
+        msg = QLabel("No dictionary source was used for this word, so there are no definitions, synonyms or examples. "
+                     "Turn some back on under Menu > Settings > Dictionary sources.")
+        msg.setObjectName("BodyText")
+        msg.setWordWrap(True)
+        vbox.addWidget(msg)
+        self.cards_layout.addWidget(card)
+
     def render(self, query_term: str, data: Dict[str, Any]) -> None:
         self._clear_cards()
         if data.get("is_reverse"):
@@ -288,6 +300,9 @@ class ResultsPage(QWidget):
             dym_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             dym_btn.clicked.connect(lambda _, w=did_you_mean: self.main_win._analyze_input(False, w))
             self.cards_layout.addWidget(dym_btn)
+
+        if not is_sentence and not senses and not dictionary_sources.REGISTRY.any_enabled():
+            self._add_all_sources_off_notice()
 
         # --- SECTION 1: Overview & Definitions (No Emoji on Deep Search!) ---
         card1_title = "1. Sentence Analysis & Translation" if is_sentence else "1. Overview & Definitions"

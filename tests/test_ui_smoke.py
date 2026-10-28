@@ -17,6 +17,7 @@ from PyQt6.QtCore import QCoreApplication, QEvent, QObject, Qt, pyqtSignal  # no
 from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
+import dictionary_sources  # noqa: E402
 import lexical_engine  # noqa: E402
 from ui import theme  # noqa: E402
 from ui.config import DB_FILE  # noqa: E402
@@ -98,6 +99,8 @@ class UiSmokeTest(unittest.TestCase):
         for payload in (WORD, SENTENCE, REVERSE, IDIOM):
             self.win.db.delete_entry(payload["headword"])
         self.win.settings.data["theme"] = "Dark Mode"
+        self.win.settings.data["disabled_sources"] = []
+        self.win.settings.apply_sources()
         self.win.close()
         self.win.deleteLater()
         self.app.processEvents()
@@ -236,6 +239,47 @@ class UiSmokeTest(unittest.TestCase):
             page._save_and_close()
         self.assertEqual(theme.THEME_COLORS["bg_main"], "#0E1621")
         self.assertFalse(self.win.right_drawer.isVisible())
+
+    def test_settings_lists_every_source_and_applies_the_toggles(self):
+        registry = dictionary_sources.REGISTRY
+        page = self.win.right_drawer.settings_page
+        self.assertEqual(list(page.source_checks), registry.names())
+        self.assertTrue(all(box.isChecked() for box in page.source_checks.values()))
+        for source in registry.all():
+            self.assertIn(source.label, page.source_checks[source.name].text())
+        page.source_checks["cambridge"].setChecked(False)
+        page.source_checks["wordnet"].setChecked(False)
+        with mock.patch.object(self.win.settings, "save") as save:
+            page._apply_live()
+        self.assertTrue(save.called)
+        self.assertEqual(self.win.settings.data["disabled_sources"], ["cambridge", "wordnet"])
+        self.assertEqual(registry.disabled_names(), ["cambridge", "wordnet"])
+        page.source_checks["cambridge"].setChecked(True)
+        with mock.patch.object(self.win.settings, "save"):
+            page._apply_live()
+        self.assertEqual(registry.disabled_names(), ["wordnet"])
+        # Reopening the page drops ticks that were never applied.
+        page.source_checks["longman"].setChecked(False)
+        page.on_show()
+        self.assertTrue(page.source_checks["longman"].isChecked())
+        self.assertFalse(page.source_checks["wordnet"].isChecked())
+
+    def test_a_clear_message_shows_only_when_every_source_is_off(self):
+        registry = dictionary_sources.REGISTRY
+        empty = {"headword": "serendipity", "persian_equivalent": "x", "senses": []}
+        self.win.results_page.render("serendipity", empty)
+        self.assertNotIn("All dictionary sources are turned off", card_texts(self.win))
+        for name in registry.names():
+            registry.set_enabled(name, False)
+        self.win.results_page.render("serendipity", empty)
+        self.assertIn("All dictionary sources are turned off", card_texts(self.win))
+        self.assertTrue(any("Settings > Dictionary sources" in t for t in card_texts(self.win)))
+        # Entries with definitions (e.g. saved ones) and one source left on need no notice.
+        self.win.results_page.render("serendipity", WORD)
+        self.assertNotIn("All dictionary sources are turned off", card_texts(self.win))
+        registry.set_enabled("wordnet", True)
+        self.win.results_page.render("serendipity", empty)
+        self.assertNotIn("All dictionary sources are turned off", card_texts(self.win))
 
     def test_teach_page_prefills_current_term(self):
         self.win._analyze_input(override_term="serendipity")
