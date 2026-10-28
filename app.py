@@ -100,6 +100,9 @@ DB_FILE = lexical_engine.user_data_path("lexicon_vault.db")
 SETTINGS_FILE = lexical_engine.user_data_path("ocean_settings.json")
 
 EN_FONT_FAMILY = "Inter"
+# Qt swaps Left/Right for right-to-left text unless AlignAbsolute is set, so plain AlignRight
+# renders Persian flush left.
+PERSIAN_ALIGNMENT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute | Qt.AlignmentFlag.AlignVCenter
 FA_FONT_FAMILY = "Vazirmatn"
 
 VOICE_OPTIONS = [
@@ -308,7 +311,9 @@ class NeuralSpeaker:
         self.settings = settings
         self._kokoro: Optional[Any] = None
         self._player: Optional[subprocess.Popen] = None
-        threading.Thread(target=self._init_kokoro, daemon=True).start()
+        # Not a daemon: quitting while onnxruntime is mid-load (~1s after start) crashes the process,
+        # so let interpreter shutdown wait for the load to finish.
+        threading.Thread(target=self._init_kokoro).start()
 
     def _find_model_files(self) -> tuple[str, str]:
         candidates = [
@@ -869,10 +874,10 @@ class PersianTranslationWidget(QWidget):
         self.label = QLabel()
         self.label.setProperty("is_persian_widget", True)
         self.label.setProperty("persian_owner", self)
-        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setTextFormat(Qt.TextFormat.PlainText)
         self.label.setWordWrap(True)
         self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.label.setAlignment(PERSIAN_ALIGNMENT)
         self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.label.setFont(make_polished_font(FA_FONT_FAMILY, font_px + (2 if large else 0), bold=large))
         self.label.setObjectName("PersianText")
@@ -882,17 +887,12 @@ class PersianTranslationWidget(QWidget):
         layout.addWidget(self.edit_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.label, 1)
 
-        self._set_persian_html(self.real_text)
+        self._set_persian_text(self.real_text)
         self._sync_visibility()
 
-    def _set_persian_html(self, fa_str: str) -> None:
+    def _set_persian_text(self, fa_str: str) -> None:
         self.real_text = fa_str.strip() or "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f"
-        escaped_fa = (
-            self.real_text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-        self.label.setText(f"<div dir='rtl' align='right' style='text-align:right;'>{escaped_fa}</div>")
+        self.label.setText(self.real_text)
 
     def _is_missing_translation(self) -> bool:
         return "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" in self.real_text or not self.real_text.strip()
@@ -933,7 +933,7 @@ class PersianTranslationWidget(QWidget):
                 self._apply_new_persian(new_txt)
 
     def _apply_new_persian(self, new_fa: str) -> None:
-        self._set_persian_html(new_fa)
+        self._set_persian_text(new_fa)
         self._sync_visibility()
         if self.main_win and self.main_win.current_term and self.main_win.current_data:
             d = self.main_win.current_data
