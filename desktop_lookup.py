@@ -122,8 +122,9 @@ def _server_name() -> str:
     return "ocean-" + re.sub(r"[^A-Za-z0-9_-]", "_", getpass.getuser())
 
 
-def send_to_running_instance(message: Dict[str, str], timeout_ms: int = 1000) -> bool:
-    """True if a running Ocean accepted the message."""
+def send_to_running_instance(message: Dict[str, str], timeout_ms: int = 3000) -> bool:
+    """True if a running Ocean accepted the message. Connecting fails at once when no instance runs;
+    the timeout only matters if the running window is busy (on Windows it must free a pipe instance)."""
     sock = QLocalSocket()
     sock.connectToServer(_server_name())
     if not sock.waitForConnected(timeout_ms):

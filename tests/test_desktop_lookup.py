@@ -57,6 +57,10 @@ class InstanceHandOffTest(unittest.TestCase):
         self.assertTrue(bad.waitForConnected(1000))
         bad.write(b"not json\n")
         bad.waitForBytesWritten(1000)
+        # On Windows (named pipes) the server prepares the next pipe instance in its event loop,
+        # which runs continuously in the real app.
+        self._pump(lambda: not server.server.hasPendingConnections(), timeout=0.5)
+        self._pump(lambda: False, timeout=0.2)
 
         self.assertTrue(desktop_lookup.send_to_running_instance({"action": "lookup", "text": "zoodgozar زودگذر"}))
         self._pump(lambda: received)
