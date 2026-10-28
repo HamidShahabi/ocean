@@ -116,6 +116,20 @@ class HistoryStore:
                     break
         return matches
 
+    def favorite_entries(self) -> List[Dict[str, Any]]:
+        """Saved (favourite) entries with their full payloads, newest first; the quiz draws on these."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT query_key, display_term, payload FROM lexicon WHERE is_favorite = 1 ORDER BY updated_at DESC"
+            ).fetchall()
+        entries = []
+        for key, term, payload in rows:
+            try:
+                entries.append({"query_key": key, "display_term": term, "payload": json.loads(payload)})
+            except ValueError:
+                continue
+        return entries
+
     def list_entries(self, favorites_only: bool = False) -> List[Dict[str, Any]]:
         query = "SELECT query_key, display_term, is_favorite, updated_at FROM lexicon"
         if favorites_only:

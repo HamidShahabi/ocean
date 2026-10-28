@@ -1,7 +1,10 @@
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
+from datetime import datetime
 from unittest import mock
 
 # lexical_engine creates its per-user data folder on import: keep tests away from the real one.
@@ -10,9 +13,12 @@ os.environ["XDG_DATA_HOME"] = _DATA
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from PyQt6.QtCore import Qt  # noqa: E402
+from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
 from ui import theme  # noqa: E402
+from ui.config import DB_FILE  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_SETTINGS, PAGE_TEACH  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 
@@ -76,6 +82,8 @@ class UiSmokeTest(unittest.TestCase):
             self.win.db.save_entry(payload["headword"], payload)
 
     def tearDown(self):
+        for word in getattr(self, "quiz_words", []):
+            self.win.db.delete_entry(word)
         for payload in (WORD, SENTENCE, REVERSE, IDIOM):
             self.win.db.delete_entry(payload["headword"])
         self.win.settings.data["theme"] = "Dark Mode"
@@ -166,6 +174,69 @@ class UiSmokeTest(unittest.TestCase):
         self.win.open_review()
         self.assertIs(self.win.stack.currentWidget(), self.win.review_page)
         self.assertTrue(self.win.review_page.term_label.text())  # a card, or "Nothing to review"
+
+    def save_quiz_words(self):
+        pairs = [("book", "کتاب"), ("water", "آب"), ("house", "خانه"), ("tree", "درخت")]
+        for en, fa in pairs:
+            self.win.db.save_entry(en, {"headword": en, "persian_equivalent": fa})
+            self.win.db.toggle_favorite(en)
+        self.quiz_words = [en for en, _ in pairs]
+
+    def test_quiz_explains_what_is_needed_with_too_few_saved_words(self):
+        self.win.open_quiz()
+        page = self.win.quiz_page
+        self.assertIs(self.win.stack.currentWidget(), page)
+        self.assertIn("at least 4", page.done_label.text())
+        self.assertFalse(page.choice_box.isVisible())
+
+    def test_quiz_session_scores_answers_and_leaves_reviews_alone(self):
+        self.save_quiz_words()
+        due_before = self.win.review_page.store.due_count(datetime.now())
+        self.win.open_quiz()
+        QTest.qWaitForWindowActive(self.win)  # shortcuts only fire in the active window
+        page = self.win.quiz_page
+        self.assertEqual(len(page.questions), 4)
+        for n in range(4):
+            question = page.questions[n]
+            right = [question.is_correct(c) for c in question.choices].index(True)
+            wrong = (right + 1) % 4
+            QTest.keyClick(page, str(1 + (right if n < 3 else wrong)))  # the last one is answered wrongly
+            self.assertTrue(page.answered)
+            QTest.keyClick(page, Qt.Key.Key_Space)
+        self.assertTrue(page.finished)
+        self.assertEqual(page.prompt_label.text(), "3 of 4 correct")
+        self.assertIn("75%", page.done_label.text())
+        # Quiz answers never schedule anything: the review deck is exactly as it was.
+        self.assertEqual(self.win.review_page.store.due_count(datetime.now()), due_before)
+        with closing(sqlite3.connect(DB_FILE)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 0)
+        # Space on the score screen plays again.
+        QTest.keyClick(page, Qt.Key.Key_Space)
+        self.assertFalse(page.finished)
+        self.assertEqual(page.results, [])
+
+    def test_quiz_escape_ends_early_with_a_score_then_goes_home(self):
+        self.save_quiz_words()
+        self.win.open_quiz()
+        QTest.qWaitForWindowActive(self.win)
+        page = self.win.quiz_page
+        QTest.keyClick(page, "2")
+        QTest.keyClick(page, Qt.Key.Key_Escape)
+        self.assertTrue(page.finished)
+        self.assertIn("ended early", page.done_label.text())
+        QTest.keyClick(page, Qt.Key.Key_Escape)
+        self.assertIs(self.win.stack.currentWidget(), self.win.home_page)
+
+    def test_quiz_reachable_from_home_and_menu(self):
+        self.save_quiz_words()
+        self.win.home_quiz_btn.click()
+        self.assertIs(self.win.stack.currentWidget(), self.win.quiz_page)
+        self.win.go_home()
+        self.win._toggle_right_drawer()
+        menu_buttons = {b.text(): b for b in self.win.right_drawer.stack.widget(PAGE_MENU).findChildren(QPushButton)}
+        menu_buttons["Quiz"].click()
+        self.assertIs(self.win.stack.currentWidget(), self.win.quiz_page)
+        self.assertFalse(self.win.right_drawer.isVisible())
 
     def test_persian_widget_uses_registered_font(self):
         self.win.results_page.render("serendipity", WORD)

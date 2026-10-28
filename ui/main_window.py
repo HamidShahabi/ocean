@@ -1,5 +1,5 @@
 """The main window: top bar, home page and navigation. It wires the pages together; the pages
-themselves live in results_page.py, review_page.py and drawer.py (history, settings, Teach Ocean)."""
+themselves live in results_page.py, review_page.py, quiz_page.py and drawer.py (history, settings, Teach Ocean)."""
 import logging
 import os
 import re
@@ -30,6 +30,7 @@ from ui import theme
 from ui.config import DB_FILE, SettingsManager
 from ui.drawer import AttachedRightDrawer
 from ui.results_page import ResultsPage
+from ui.quiz_page import QuizPage
 from ui.review_page import ReviewPage
 from ui.speaker import NeuralSpeaker
 from ui.theme import THEME_COLORS, VectorIcons
@@ -279,7 +280,22 @@ class MainWindow(QMainWindow):
         self.home_review_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.home_review_btn.setToolTip("Review your saved words (spaced repetition)")
         self.home_review_btn.clicked.connect(self.open_review)
-        self.home_vbox.addWidget(self.home_review_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.home_quiz_btn = QPushButton("Quiz")
+        self.home_quiz_btn.setObjectName("GlassPillButton")
+        self.home_quiz_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.home_quiz_btn.setFixedHeight(36)
+        self.home_quiz_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.home_quiz_btn.setToolTip("Quiz yourself on your saved words")
+        self.home_quiz_btn.clicked.connect(self.open_quiz)
+
+        home_actions = QHBoxLayout()
+        home_actions.setSpacing(12)
+        home_actions.addStretch(1)
+        home_actions.addWidget(self.home_review_btn)
+        home_actions.addWidget(self.home_quiz_btn)
+        home_actions.addStretch(1)
+        self.home_vbox.addLayout(home_actions)
         self.home_vbox.addStretch(1)
 
         self.stack.addWidget(self.home_page)
@@ -291,6 +307,10 @@ class MainWindow(QMainWindow):
         # VIEW 2: Spaced-repetition review
         self.review_page = ReviewPage(self)
         self.stack.addWidget(self.review_page)
+
+        # VIEW 3: Quiz on saved words
+        self.quiz_page = QuizPage(self)
+        self.stack.addWidget(self.quiz_page)
 
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)
@@ -385,6 +405,14 @@ class MainWindow(QMainWindow):
         self.review_page.start()
         self.stack.setCurrentIndex(2)
         self.review_page.setFocus()
+
+    def open_quiz(self) -> None:
+        self.sug_popup.hide()
+        self.right_drawer.hide()
+        self.status_label.setText("")
+        self.quiz_page.start()
+        self.stack.setCurrentIndex(3)
+        self.quiz_page.setFocus()
 
     def refresh_review_badges(self) -> None:
         try:
