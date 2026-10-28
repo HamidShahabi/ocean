@@ -7,6 +7,8 @@ import json
 import shutil
 import logging
 import sqlite3
+import threading
+from contextlib import closing
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Tuple
@@ -122,6 +124,7 @@ except Exception:
 _CT2_TRANSLATOR = None
 _SP_PROCESSOR = None
 _CT2_IS_NLLB = False  # NLLB models need eng_Latn/pes_Arab language tokens; Marian-style models don't.
+_CT2_LOAD_LOCK = threading.Lock()  # a lookup arriving mid-preload waits on this instead of loading twice
 
 
 def _log_failure(what: str) -> None:
@@ -158,7 +161,7 @@ def query_offline_core_lexicon(term: str) -> str:
     if not os.path.exists(OFFLINE_CORE_DB):
         return ""
     try:
-        with sqlite3.connect(OFFLINE_CORE_DB) as conn:
+        with closing(sqlite3.connect(OFFLINE_CORE_DB)) as conn:
             cur = conn.execute("SELECT fa FROM en_fa_lexicon WHERE term = ?", (term.strip().lower(),))
             row = cur.fetchone()
             return row[0] if row else ""
@@ -171,7 +174,7 @@ def query_offline_bnc_collocations(headword: str) -> List[Dict[str, str]]:
     if not os.path.exists(OFFLINE_CORE_DB):
         return []
     try:
-        with sqlite3.connect(OFFLINE_CORE_DB) as conn:
+        with closing(sqlite3.connect(OFFLINE_CORE_DB)) as conn:
             cur = conn.execute(
                 "SELECT collocation, example_en FROM bnc_collocations WHERE headword = ?",
                 (headword.strip().lower(),),
@@ -182,22 +185,52 @@ def query_offline_bnc_collocations(headword: str) -> List[Dict[str, str]]:
         return []
 
 
+def _load_ct2_model() -> None:
+    """Load the CTranslate2 model once; concurrent callers wait for the load in progress."""
+    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB
+    with _CT2_LOAD_LOCK:
+        if _CT2_TRANSLATOR is not None and _SP_PROCESSOR is not None:
+            return
+        sp_p = os.path.join(OFFLINE_MT_DIR, "sentencepiece.model")
+        md_p = os.path.join(OFFLINE_MT_DIR, "model")
+        if not (os.path.exists(sp_p) and os.path.isdir(md_p)):
+            return
+        sp_proc = spm.SentencePieceProcessor(model_file=sp_p)
+        translator = ctranslate2.Translator(md_p, device="cpu", compute_type="int8")
+        vocab_p = os.path.join(md_p, "shared_vocabulary.txt")
+        if os.path.exists(vocab_p):
+            with open(vocab_p, encoding="utf-8") as vf:
+                _CT2_IS_NLLB = any(line.strip() == "pes_Arab" for line in vf)
+        _SP_PROCESSOR, _CT2_TRANSLATOR = sp_proc, translator
+
+
+def preload_offline_translator() -> threading.Thread:
+    """Load the offline model in the background so the first offline lookup doesn't stall.
+    Not a daemon: quitting while the native model is mid-load crashes the process, so
+    interpreter shutdown waits for the load to finish (same as the Kokoro voice model)."""
+    def run() -> None:
+        if not HAS_CT2_BACKUP:
+            return
+        try:
+            _load_ct2_model()
+            if _CT2_TRANSLATOR is None:
+                log.info("Offline translation model not found in %s", OFFLINE_MT_DIR)
+            else:
+                log.info("Offline translation model loaded")
+        except Exception:
+            log.exception("Could not preload the offline translation model")
+
+    thread = threading.Thread(target=run, name="ct2-preload")
+    thread.start()
+    return thread
+
+
 def _ct2_translate(text: str, to_english: bool = False) -> str:
     """Raw offline translation with the CTranslate2 model (EN->FA, or FA->EN with an NLLB model)."""
-    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB
     if not HAS_CT2_BACKUP:
         return ""
     try:
-        if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
-            sp_p = os.path.join(OFFLINE_MT_DIR, "sentencepiece.model")
-            md_p = os.path.join(OFFLINE_MT_DIR, "model")
-            if os.path.exists(sp_p) and os.path.isdir(md_p):
-                _SP_PROCESSOR = spm.SentencePieceProcessor(model_file=sp_p)
-                _CT2_TRANSLATOR = ctranslate2.Translator(md_p, device="cpu", compute_type="int8")
-                vocab_p = os.path.join(md_p, "shared_vocabulary.txt")
-                if os.path.exists(vocab_p):
-                    with open(vocab_p, encoding="utf-8") as vf:
-                        _CT2_IS_NLLB = any(line.strip() == "pes_Arab" for line in vf)
+        _load_ct2_model()
         if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
             return ""
         tokens = _SP_PROCESSOR.encode(text, out_type=str)
@@ -1260,8 +1293,6 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
         fa_sent = USER_MEMORY.get("overrides", {}).get(low, "")
         if not fa_sent:
             fa_sent = translate_via_clients5(contextual_en, is_short=False) or translate_single_string(contextual_en, is_short=False)
-            if "spirit gum" in low and "\u0686\u0633\u0628 \u06af\u0631\u06cc\u0645" not in fa_sent:
-                fa_sent = re.sub(r"\u0622\u062f\u0627\u0645\u0633\s+\S+|\u0635\u0645\u063a\s+\S+", "\u0686\u0633\u0628 \u06af\u0631\u06cc\u0645", fa_sent)
 
         return {
             "headword": clean,
