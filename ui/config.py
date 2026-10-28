@@ -1,4 +1,5 @@
 """Paths, option lists and the settings file shared by every part of the UI (no Qt imports)."""
+import copy
 import json
 import logging
 import os
@@ -50,11 +51,14 @@ class SettingsManager:
         "speech_rate": 0,
         "voice_id": "am_michael (Male - US)",
         "theme": "Dark Mode",
+        # Names (DictionarySource.name) of the dictionary sources switched off in Settings. Storing the
+        # off ones keeps every source, including any added later, on by default.
+        "disabled_sources": [],
     }
 
     def __init__(self, path: str = SETTINGS_FILE) -> None:
         self.path = path
-        self.data: Dict[str, Any] = dict(self.DEFAULTS)
+        self.data: Dict[str, Any] = copy.deepcopy(self.DEFAULTS)
         self.load()
 
     def load(self) -> None:
@@ -66,6 +70,8 @@ class SettingsManager:
                         self.data.update(loaded)
                 if self.data.get("voice_id") not in VOICE_OPTIONS:
                     self.data["voice_id"] = VOICE_OPTIONS[0]
+                off = self.data.get("disabled_sources")
+                self.data["disabled_sources"] = [n for n in off if isinstance(n, str)] if isinstance(off, list) else []
             except Exception:
                 log.exception("Could not read settings %s; using defaults", self.path)
 
@@ -75,3 +81,12 @@ class SettingsManager:
                 json.dump(self.data, f, indent=2)
         except Exception:
             log.exception("Could not save settings %s", self.path)
+
+    def apply_sources(self, registry: Any = None) -> None:
+        """Switch the registry's dictionary sources on or off to match the saved choice (names the registry
+        no longer knows are ignored, sources the settings never heard of stay on)."""
+        if registry is None:
+            from dictionary_sources import REGISTRY as registry
+        off = set(self.data.get("disabled_sources", []))
+        for name in registry.names():
+            registry.set_enabled(name, name not in off)

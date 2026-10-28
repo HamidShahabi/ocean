@@ -115,6 +115,10 @@ class SourceRegistry:
     def is_enabled(self, name: str) -> bool:
         return name not in self._disabled
 
+    def any_enabled(self) -> bool:
+        """False when the user has switched every source off (says nothing about offline-only mode)."""
+        return any(s.name not in self._disabled for s in self._sources)
+
     def disabled_names(self) -> List[str]:
         return sorted(self._disabled)
 

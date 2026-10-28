@@ -53,6 +53,15 @@ YOUR DATA
       Windows: %APPDATA%\Ocean        Linux: ~/.local/share/Ocean
   Data from older versions (kept next to the app) is copied there on first start.
 
+DICTIONARY SOURCES
+  Menu > Settings > Dictionary sources lists every source Ocean consults, each
+  with a checkbox. Untick one that is broken, slow or unwanted and click Apply
+  (or Save): it is never contacted for any lookup, and the choice is remembered.
+  The bundled sources (idiom list, synonyms, WordNet...) are listed too, marked
+  "(bundled)". Lookups work with any mix switched off; with all of them off Ocean
+  says so in the results (the Persian translation, pronunciation and your own
+  taught entries still appear).
+
 OFFLINE MODE
   Online dictionaries and Google Translate are used when available. Without
   internet, Persian translation falls back to the bundled NLLB-200 model in

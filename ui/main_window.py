@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self.resize(1220, 850)
 
         self.settings = SettingsManager()
+        self.settings.apply_sources()
         self.db = storage.HistoryStore(DB_FILE)
         self.speaker = NeuralSpeaker(self.settings)
         self.current_term: Optional[str] = None
