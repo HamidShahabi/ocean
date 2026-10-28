@@ -1597,8 +1597,6 @@ def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, A
         fa_sent = USER_MEMORY.get("overrides", {}).get(low, "")
         if not fa_sent:
             fa_sent = translate_via_clients5(contextual_en, is_short=False) or translate_single_string(contextual_en, is_short=False)
-            if "spirit gum" in low and "\u0686\u0633\u0628 \u06af\u0631\u06cc\u0645" not in fa_sent:
-                fa_sent = re.sub(r"\u0622\u062f\u0627\u0645\u0633\s+\S+|\u0635\u0645\u063a\s+\S+", "\u0686\u0633\u0628 \u06af\u0631\u06cc\u0645", fa_sent)
 
         return {
             "headword": clean,
