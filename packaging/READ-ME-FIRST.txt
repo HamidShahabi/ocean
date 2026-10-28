@@ -1,0 +1,24 @@
+OCEAN - English -> Persian dictionary for learners
+=================================================
+
+START
+  1. Unzip this folder anywhere (e.g. Documents\Ocean). Keep all files together.
+  2. Double-click Ocean.exe.
+     Windows may say "Windows protected your PC" because the app isn't signed:
+     click "More info", then "Run anyway". Only needed the first time.
+
+USE
+  - Type an English word, idiom or sentence and press Enter.
+  - Click the speaker buttons to hear pronunciation.
+  - Click "Save" (star) on a word to add it to your review deck; review it
+    from the "Review" button on the home screen (Space shows the answer,
+    keys 1-4 grade it).
+  - Look up from any app: copy a word (Ctrl+C), then press Ctrl+Alt+O while
+    Ocean is running.
+  - Menu > History > Export to Anki makes a file you can import into Anki.
+
+Works offline too (lower-quality translation when there's no internet).
+
+YOUR DATA
+  History, saved words and settings are kept in %APPDATA%\Ocean, so you can
+  replace this folder with a newer version without losing anything.

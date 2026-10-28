@@ -1,3 +1,6 @@
+# -NoLaunch: build only (used by CI).
+param([switch]$NoLaunch)
+
 Write-Host "Building Fast 100% Offline-Capable Portable Ocean..." -ForegroundColor Cyan
 Get-Process -Name "Ocean" -ErrorAction SilentlyContinue | Stop-Process -Force
 
@@ -58,7 +61,7 @@ if (Test-Path "fonts") {
 }
 
 $exePath = Join-Path $PWD "dist\Ocean\Ocean.exe"
-if (Test-Path $exePath) {
+if ((Test-Path $exePath) -and -not $NoLaunch) {
     Write-Host "[SUCCESS] Launching 100% Offline-Ready Ocean..." -ForegroundColor Green
     Start-Process -FilePath $exePath -WorkingDirectory ".\dist\Ocean"
 }

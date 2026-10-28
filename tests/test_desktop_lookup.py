@@ -1,4 +1,6 @@
+import json
 import os
+import subprocess
 import sys
 import time
 import unittest
@@ -46,6 +48,16 @@ class InstanceHandOffTest(unittest.TestCase):
     def test_no_running_instance(self):
         self.assertFalse(desktop_lookup.send_to_running_instance({"action": "show"}, timeout_ms=200))
 
+    def _send_from_another_process(self, message):
+        """Real hand-offs come from a separate process; sending from this thread would block the
+        server's event loop (on Windows it must prepare a new pipe instance per connection)."""
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = ("import sys, json; sys.path.insert(0, sys.argv[1]);"
+                "from PyQt6.QtCore import QCoreApplication; app = QCoreApplication([]);"
+                "import desktop_lookup; desktop_lookup._server_name = lambda: sys.argv[2];"
+                "sys.exit(0 if desktop_lookup.send_to_running_instance(json.loads(sys.argv[3])) else 1)")
+        return subprocess.Popen([sys.executable, "-c", code, repo, desktop_lookup._server_name(), json.dumps(message)])
+
     def test_message_round_trip_and_malformed_input_ignored(self):
         server = InstanceServer()
         self.assertTrue(server.listen())
@@ -57,10 +69,13 @@ class InstanceHandOffTest(unittest.TestCase):
         self.assertTrue(bad.waitForConnected(1000))
         bad.write(b"not json\n")
         bad.waitForBytesWritten(1000)
+        self._pump(lambda: False, timeout=0.3)  # let the server accept it and read the bad line
 
-        self.assertTrue(desktop_lookup.send_to_running_instance({"action": "lookup", "text": "zoodgozar زودگذر"}))
-        self._pump(lambda: received)
-        self.assertEqual(received, [{"action": "lookup", "text": "zoodgozar زودگذر"}])
+        message = {"action": "lookup", "text": "zoodgozar \u0632\u0648\u062f\u06af\u0630\u0631"}
+        sender = self._send_from_another_process(message)
+        self._pump(lambda: received and sender.poll() is not None, timeout=20)
+        self.assertEqual(sender.wait(5), 0)
+        self.assertEqual(received, [message])
         bad.abort()
         server.server.close()
 

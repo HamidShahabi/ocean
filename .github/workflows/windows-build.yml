@@ -1,0 +1,73 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["release/**"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up (venv, dependencies, NLTK data, voice + translation models, fonts, icon)
+        env:
+          QT_QPA_PLATFORM: offscreen   # icon generation creates a QApplication; no desktop needed
+        run: |
+          python -m venv .venv   # setup_windows.ps1 reuses an existing .venv
+          ./setup_windows.ps1
+
+      - name: Unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: .venv\Scripts\python.exe -m unittest discover -s tests -v
+
+      - name: Build Ocean.exe
+        run: |
+          ./update_ocean.ps1 -NoLaunch
+          if (-not (Test-Path dist\Ocean\Ocean.exe)) { throw "PyInstaller did not produce dist\Ocean\Ocean.exe" }
+
+      - name: Smoke test the built app
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $app = Start-Process dist\Ocean\Ocean.exe -WorkingDirectory dist\Ocean -PassThru
+          Start-Sleep -Seconds 20
+          if ($app.HasExited) { throw "Ocean.exe exited early with code $($app.ExitCode)" }
+
+          # A second launch must hand its lookup to the running window and exit (single instance).
+          $second = Start-Process dist\Ocean\Ocean.exe -ArgumentList "--lookup", "serendipity" -WorkingDirectory dist\Ocean -PassThru
+          if (-not $second.WaitForExit(30000)) { throw "Second launch did not hand off and exit" }
+          Start-Sleep -Seconds 15
+          if ($app.HasExited) { throw "Ocean.exe died after the lookup (code $($app.ExitCode))" }
+
+          $log = Join-Path $env:APPDATA "Ocean\ocean.log"
+          if (-not (Test-Path $log)) { throw "No log at $log (user data folder not created?)" }
+          Get-Content $log
+          if (-not (Select-String -Path $log -Pattern "External lookup" -Quiet)) { throw "Running window never received the hand-off" }
+          if (Select-String -Path $log -Pattern "Could not register" -Quiet) { throw "Ctrl+Alt+O hotkey registration failed" }
+          Stop-Process -Id $app.Id
+
+      - name: Package
+        run: |
+          Copy-Item packaging\READ-ME-FIRST.txt dist\Ocean\
+          $name = "Ocean-windows-x64-$($env:GITHUB_SHA.Substring(0,7)).zip"
+          7z a -tzip -mx=5 $name .\dist\Ocean | Out-Null
+          "ZIP_NAME=$name" >> $env:GITHUB_ENV
+          Get-Item $name | Select-Object Name, @{n="MB"; e={[math]::Round($_.Length / 1MB)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ocean-windows
+          path: ${{ env.ZIP_NAME }}
+          compression-level: 0   # already a zip
+          retention-days: 14
