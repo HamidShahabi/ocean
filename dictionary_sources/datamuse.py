@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 import lexical_engine as le
 from .base import DictionarySource, LookupContext, PartialEntry
@@ -58,3 +58,33 @@ class DatamuseSource(DictionarySource):
         except Exception:
             le._log_failure(f"Source {self.name!r} suggestions failed for {prefix!r}")
         return []
+
+
+class DatamuseFrequencySource(DictionarySource):
+    """How common the word is (occurrences per million words, Datamuse's `f:` tag). None of the lookups
+    above returns the headword itself, so this asks for it; it runs beside them, adding no wait."""
+    name = "datamuse_frequency"
+    label = "Datamuse word frequency"
+    part_of = "datamuse"  # the same site: the Datamuse toggle in Settings covers both
+
+    def applies(self, ctx: LookupContext) -> bool:
+        return not ctx.is_idiom and len(ctx.term.split()) == 1 and ctx.term.isalpha()
+
+    def fetch(self, ctx: LookupContext, entry: PartialEntry, prior: PartialEntry) -> None:
+        r = ctx.request("GET", "https://api.datamuse.com/words", params={"sp": ctx.term.strip(), "md": "f", "max": 1}, timeout=2.0)
+        if r.ok:
+            entry.frequency = self.parse(r.json(), ctx.term.strip())
+
+    @staticmethod
+    def parse(items: List[dict], term: str) -> Optional[float]:
+        """The `f:` tag of the item that is the term itself (`sp` also returns near spellings)."""
+        for item in items:
+            if item.get("word", "").lower() != term.lower():
+                continue
+            for tag in item.get("tags", []):
+                if tag.startswith("f:"):
+                    try:
+                        return float(tag[2:])
+                    except ValueError:
+                        return None
+        return None

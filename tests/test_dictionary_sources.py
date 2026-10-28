@@ -58,6 +58,8 @@ def fixture_site(method, url, **kwargs):
         return FakeResponse(fixture("dictionaryapi_bright.json"))
     if u.netloc == "api.datamuse.com" and u.path == "/words" and params.get("rel_syn") == "bright":
         return FakeResponse(fixture("datamuse_syn_bright.json"))
+    if u.netloc == "api.datamuse.com" and u.path == "/words" and params.get("sp") == "bright":
+        return FakeResponse(fixture("datamuse_freq_bright.json"))
     if u.netloc == "api.datamuse.com" and u.path == "/words" and params.get("rel_ant") == "bright":
         return FakeResponse(fixture("datamuse_ant_bright.json"))
     if u.netloc == "api.datamuse.com" and u.path == "/words" and ("rel_jja" in params or "rel_jjb" in params):
@@ -160,6 +162,28 @@ class SourceFixtureTest(unittest.TestCase):
             return FakeResponse("[]")
         ds.DatamuseSource().lookup(LookupContext(term="bright", requester=requester), PartialEntry(primary_pos="Noun"))
         self.assertEqual(asked, [["rel_syn"], ["rel_ant"], ["rel_jjb"]])
+
+    def test_datamuse_frequency_reads_the_headwords_own_tag(self):
+        entry = ds.DatamuseFrequencySource().lookup(ctx_for("bright"))
+        self.assertEqual(entry.frequency, 31.2)  # not the near spelling "brighter" that comes with it
+        self.assertIsNone(ds.DatamuseFrequencySource().lookup(ctx_for("zzzz")).frequency)  # 404
+        parse = ds.DatamuseFrequencySource.parse
+        self.assertIsNone(parse([{"word": "bright", "tags": ["n"]}], "bright"))
+        self.assertIsNone(parse([{"word": "bright", "tags": ["f:oops"]}], "bright"))
+        self.assertEqual(parse([{"word": "Bright", "tags": ["f:0.5"]}], "bright"), 0.5)
+
+    def test_datamuse_frequency_asks_for_the_word_with_md_f_and_only_for_single_words(self):
+        asked = []
+
+        def requester(method, url, **kwargs):
+            asked.append(kwargs.get("params"))
+            return FakeResponse("[]")
+        ds.DatamuseFrequencySource().lookup(LookupContext(term="bright", requester=requester))
+        self.assertEqual(asked, [{"sp": "bright", "md": "f", "max": 1}])
+        source = ds.REGISTRY.get("datamuse_frequency")
+        self.assertTrue(source.applies(ctx_for("bright")))
+        self.assertFalse(source.applies(ctx_for("break the ice", is_idiom=True)))
+        self.assertFalse(source.applies(ctx_for("a*")))
 
     def test_datamuse_suggestions(self):
         with mock.patch.object(le, "smart_request", fixture_site):
@@ -308,6 +332,8 @@ class RegistryRunTest(unittest.TestCase):
         c = PartialEntry(primary_pos="Verb")
         merged = merge_entries([a, b, c])
         self.assertEqual((merged.ipa_us, merged.primary_pos, merged.syns), ("/a/", "Noun", ["x", "y"]))
+        self.assertIsNone(merged.frequency)
+        self.assertEqual(merge_entries([a, PartialEntry(frequency=0.0), PartialEntry(frequency=5.0)]).frequency, 0.0)
 
 
 class EngineIntegrationTest(unittest.TestCase):
@@ -333,6 +359,20 @@ class EngineIntegrationTest(unittest.TestCase):
         self.assertEqual([s["term"] for s in result["synonyms"]], ["brilliant", "radiant", "good"])
         self.assertEqual([s["term"] for s in result["antonyms"]], ["dim", "dull", "pale"])
         self.assertEqual([c["term"] for c in result["collocations"]], ["bright light", "bright idea", "bright future"])
+
+    def test_result_carries_the_level_and_the_frequency_band(self):
+        result = self.lookup("bright")
+        self.assertEqual(result["cefr_level"], "A1")
+        self.assertEqual(result["frequency_per_million"], 31.2)
+        self.assertEqual(result["frequency_band"], "Common")
+
+    def test_level_works_offline_while_the_band_needs_datamuse(self):
+        self.addCleanup(ds.REGISTRY.set_enabled, "datamuse_frequency", True)
+        ds.REGISTRY.set_enabled("datamuse_frequency", False)
+        result = self.lookup("bright")
+        self.assertEqual(result["cefr_level"], "A1")
+        self.assertIsNone(result["frequency_per_million"])
+        self.assertEqual(result["frequency_band"], "")
 
     def test_lookup_still_works_with_a_source_switched_off(self):
         self.addCleanup(ds.REGISTRY.set_enabled, "cambridge", True)

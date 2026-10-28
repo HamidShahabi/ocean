@@ -25,7 +25,7 @@ done
 
 # Data files live next to the executable (ui.config.get_base_dir / lexical_engine._get_engine_base_dir look there).
 # User data (history, memory, settings) lives in ~/.local/share/Ocean, not in the build.
-for f in offline_lexicon.json ocean_offline_core.db voices-v1.0.bin; do
+for f in offline_lexicon.json cefr_levels.json ocean_offline_core.db voices-v1.0.bin; do
     [ -f "$f" ] && cp -f "$f" dist/Ocean/
 done
 # One voice model only: int8 (~88 MB) if present, else the full-size one (~310 MB).

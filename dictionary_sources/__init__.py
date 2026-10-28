@@ -4,11 +4,12 @@ To fix, replace or switch off a site, touch only its module (or REGISTRY.set_ena
 To add one, subclass DictionarySource and register it below; position in the list is merge order.
 
 Seams for later work: REGISTRY.set_enabled / disabled_names (Settings), LookupContext.offline with
-DictionarySource.needs_network (offline-only mode), LookupContext.requester / .request (request cache).
+DictionarySource.needs_network (offline-only mode), LookupContext.requester / .request (replace the network in
+tests). The per-lookup request cache is not here: it sits in lexical_engine.smart_request, so it covers every source.
 """
 from .base import DictionarySource, LookupContext, PartialEntry, SourceRegistry, merge_entries
 from .cambridge import CambridgeSource
-from .datamuse import DatamuseSource
+from .datamuse import DatamuseFrequencySource, DatamuseSource
 from .dictionaryapi import DictionaryApiSource
 from .longman import LongmanSource
 from .offline import CuratedSynonymsSource, IdiomFallbackSource, OfflineIdiomsSource
@@ -31,6 +32,7 @@ for _source in (
     DictionaryApiSource(),
     WordNetSource(),
     DatamuseSource(),
+    DatamuseFrequencySource(),
     TatoebaSource(),
 ):
     REGISTRY.register(_source)

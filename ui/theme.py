@@ -316,6 +316,23 @@ def apply_theme(settings_data: dict) -> str:
             background: transparent;
             border: none;
         }}
+        QLabel#LevelBadge {{
+            color: {c['accent']};
+            background: transparent;
+            border: 1px solid {c['accent']};
+            border-radius: 10px;
+            padding: 2px 10px;
+            font-size: {px - 1}px;
+            font-weight: 700;
+        }}
+        QLabel#FrequencyBadge {{
+            color: {c['text_muted']};
+            background: transparent;
+            border: 1px solid {c['border']};
+            border-radius: 10px;
+            padding: 2px 10px;
+            font-size: {px - 1}px;
+        }}
         QLabel#BodyText {{
             color: {c['text_main']};
             font-size: {px}px;
@@ -334,6 +351,32 @@ def apply_theme(settings_data: dict) -> str:
             font-size: {max(11, px - 1)}px;
             background: transparent;
             border: none;
+        }}
+        QCheckBox {{
+            color: {c['text_main']};
+            font-size: {px}px;
+            spacing: 8px;
+            background: transparent;
+        }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 1px solid {c['text_muted']};
+            border-radius: 5px;
+            background: transparent;
+        }}
+        QCheckBox::indicator:checked {{
+            border-color: {c['accent']};
+            background: {c['accent']};
+        }}
+        QLabel#OfflineBadge {{
+            color: {c['accent']};
+            font-size: {max(11, px - 1)}px;
+            font-weight: 600;
+            background: transparent;
+            border: 1px solid {c['accent']};
+            border-radius: 12px;
+            padding: 6px 12px;
         }}
         QLabel#HistoryTermLabel {{
             color: {c['text_main']};
@@ -385,6 +428,24 @@ def apply_theme(settings_data: dict) -> str:
             border: 1px solid {c['accent']};
             background-color: {c['accent_bg']};
             color: {c['accent_fg']};
+        }}
+        QPushButton#QuizCorrectButton {{
+            background-color: rgba(46, 160, 67, 0.28);
+            color: {c['text_main']};
+            border: 1.5px solid #2EA043;
+            border-radius: 17px;
+            padding: 0px 16px;
+            font-size: {max(12, px - 1)}px;
+            font-weight: 700;
+        }}
+        QPushButton#QuizWrongButton {{
+            background-color: rgba(248, 81, 73, 0.24);
+            color: {c['text_main']};
+            border: 1.5px solid #F85149;
+            border-radius: 17px;
+            padding: 0px 16px;
+            font-size: {max(12, px - 1)}px;
+            font-weight: 700;
         }}
         QPushButton#ClickableWordPill {{
             background-color: {c['bg_card']};

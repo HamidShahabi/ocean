@@ -23,15 +23,53 @@ PERSIAN -> ENGLISH
   candidate to open its full English entry. Offline, the bundled NLLB model
   translates (lower quality).
 
+READ EXAMPLES ALOUD
+  The speaker button next to an example sentence reads it aloud and highlights
+  each word as it is spoken. With the Kokoro neural voice the highlight follows
+  an estimate of each word's timing (the voice gives no word timestamps), so it
+  can be slightly off on long or unusual words. The fallback voices (Windows
+  SAPI, or spd-say / espeak on Linux) play the sentence without highlighting.
+  Playing another clip clears the highlight.
+
 REVIEW (SPACED REPETITION)
   Words you save with the star button become flashcards. Open Review from the
   home screen or the menu: Space shows the answer, keys 1-4 grade it
   (Again / Hard / Good / Easy). Esc ends the session. Words come back for review
   at growing intervals (SM-2 scheduling); un-starring a word pauses it.
 
+QUIZ
+  Open Quiz from the home screen or the menu to test yourself on your saved
+  words: ten four-choice questions, English -> Persian and Persian -> English,
+  with wrong options drawn from your other saved words. Keys 1-4 answer, Space
+  moves on, and the session ends with a score (Esc ends early). You need at
+  least four saved words with different meanings. Quiz answers do not change
+  your Review schedule: picking from four options is a much weaker signal than
+  recalling a word and grading yourself, so only Review schedules cards.
+
+  Fill in the blank: once you have more than one quiz mode, a picker next to the
+  title switches between them. This mode shows an example sentence of a saved
+  word with the word blanked out (every form of it: "run" also blanks runs, ran,
+  running; "break the ice" also blanks "broke the ice") and you type it. Press
+  Enter to check, then Enter or Space for the next one; keys 1-4 and Space type
+  normally while the answer box is focused. Answers ignore upper/lower case, and
+  either the form used in the sentence ("ran") or the word as you saved it
+  ("run") counts. The full sentence is shown after each answer. Saved words
+  without an example sentence that contains the word are skipped. Typed answers
+  do not change your Review schedule either.
+
+HISTORY SEARCH AND SORTING
+  Menu > History has a search box that filters as you type, in English or
+  Persian (it matches the word and its Persian meaning; Arabic and Persian
+  letter variants such as ي/ی and ك/ک count as the same). Sort by Most Recent
+  or Most Looked Up; the search and the sort both combine with "Saved
+  Favorites Only". Each lookup you make (typing a word, picking a suggestion,
+  clicking a history row or candidate, the Ctrl+Alt+O hotkey) adds one to that
+  word's counter, shown as x2, x3... beside it; existing history starts at 1.
+  Refresh, Deep search, back/forward and re-showing a result do not count.
+
 EXPORT TO ANKI
   Menu > History > Export to Anki writes the listed entries (all searches, or
-  saved words only, following the filter) to a text file. In Anki (2.1.55+)
+  saved words only, narrowed by any search text) to a text file. In Anki (2.1.55+)
   choose File > Import and pick it: notes land in the "Ocean" deck with
   Persian, IPA, definitions and examples. Importing again updates them.
 
@@ -47,6 +85,15 @@ LOOK UP FROM ANY APP (Ctrl+Alt+O)
     Other Linux desktops: bind any key to  <ocean folder>/run.sh --lookup
   You can also run:  run.sh --lookup <text>
 
+REFRESHING SAVED ENTRIES
+  Saved lookups are fetched again when they are older than the period set in
+  Menu > Settings > Refresh Saved Entries (Never / 1 week / 1 month / 3 months /
+  6 months; default 3 months), or when they were produced by an older version of
+  Ocean's lookup engine, so fixes and improvements reach old entries. "Never"
+  turns refreshing off. Your star, review progress and Persian edits are kept.
+  If the refetch fails (e.g. you are offline) or finds nothing, the saved copy is
+  shown and refreshed on a later lookup.
+
 YOUR DATA
   History, favourites, your translation fixes, settings and the log file (ocean.log)
   are stored per user, so updating or rebuilding the app never touches them:
@@ -59,11 +106,53 @@ VOICE
   kokoro-v1.0.onnx (~310 MB) next to the app it keeps working, but the int8 file
   is preferred when both are present. Delete the full-size file to save space.
 
+DICTIONARY SOURCES
+  Menu > Settings > Dictionary sources lists every source Ocean consults, each
+  with a checkbox. Untick one that is broken, slow or unwanted and click Apply
+  (or Save): it is never contacted for any lookup, and the choice is remembered.
+  The bundled sources (idiom list, synonyms, WordNet...) are listed too, marked
+  "(bundled)". Lookups work with any mix switched off; with all of them off Ocean
+  says so in the results (the Persian translation, pronunciation and your own
+  taught entries still appear).
+
 OFFLINE MODE
   Online dictionaries and Google Translate are used when available. Without
   internet, Persian translation falls back to the bundled NLLB-200 model in
   offline_mt_model\ (downloaded by the setup script). The model is loaded in the
   background right after startup, so the first offline lookup doesn't wait for it.
+
+  Offline-only mode (Menu > Settings > "Offline-only mode", then Apply or Save)
+  makes Ocean send no network request at all, for privacy or for travelling.
+  Lookups use only your history, your own entries and fixes, the bundled
+  lexicon, WordNet and the offline NLLB translator; the Kokoro voice (and the
+  system voice fallback) already runs on your computer. Suggestions as you type
+  come from your history and entries only. Results show an "Offline-only mode"
+  notice. Expect fewer examples and synonyms, and lower-quality Persian for
+  words that are not in the bundled lexicon. The choice is remembered.
+
+WORD LEVEL AND FREQUENCY BADGES
+  English results show two small badges under the headword. The level badge
+  (A1-C2, CEFR) appears when the word is in the bundled word list; it works
+  offline, and an inflected form such as "running" takes the level of its base
+  form ("run"). The frequency badge (Very common / Common / Uncommon / Rare)
+  needs internet: it comes from Datamuse, which reports how often the word
+  occurs per million words (Very common: 100 or more, Common: 10-99,
+  Uncommon: 1-9, Rare: under 1). Hover a badge for the details. Learn the A1-B1
+  words first; the higher levels and rare words can wait.
+
+  The word list is cefr_levels.json (next to offline_lexicon.json in builds):
+    A1-B2: The CEFR-J Wordlist Version 1.5. Compiled by Yukio Tono, Tokyo
+      University of Foreign Studies. Retrieved from
+      http://www.cefr-j.org/download.html on 1/20/2020 (distributed in
+      github.com/openlanguageprofiles/olp-en-cefrj). Free for research and
+      commercial use provided the dataset is cited; copyright Tono Laboratory,
+      Tokyo University of Foreign Studies, no warranty.
+    C1-C2: Octanove Vocabulary Profile C1/C2 version 1.0 by Octanove Labs
+      (same repository), licensed CC BY-SA 4.0
+      (https://creativecommons.org/licenses/by-sa/4.0/). The C1/C2 words in
+      cefr_levels.json are redistributed under that licence.
+  Words listed at several levels (one per part of speech) show their lowest.
+  tools/build_cefr_levels.py regenerates the file from the two CSVs.
 
 DEVELOPMENT
   Run the tests:  .venv/bin/python -m unittest discover -s tests

@@ -1,6 +1,6 @@
 """Results page: renders a lookup payload as cards (overview, collocations, morphology, ...)."""
 import re
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCursor
@@ -15,7 +15,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import dictionary_sources
 import lexical_engine
+from ui.highlight import ExampleHighlighter
 from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS
 from ui.widgets import PersianTranslationWidget, SmoothGlassFrame, create_audio_button
 
@@ -29,6 +31,7 @@ class ResultsPage(QWidget):
     def __init__(self, main_win: "MainWindow") -> None:
         super().__init__()
         self.main_win = main_win
+        self.example_highlighter = ExampleHighlighter(main_win.speaker)
         self.setObjectName('ResultsPage')
         res_vbox = QVBoxLayout(self)
         res_vbox.setContentsMargins(0, 0, 0, 0)
@@ -78,6 +81,28 @@ class ResultsPage(QWidget):
         px = int(self.main_win.settings.data.get("base_font_px", 14))
         mode = self.main_win.settings.data.get("learning_mode", "Click to Reveal Persian")
         return PersianTranslationWidget(text, px, mode, en_source=en_source, main_win=self.main_win, large=large)
+
+    def _create_level_badges(self, data: Dict[str, Any]) -> Optional[QHBoxLayout]:
+        """CEFR level and frequency band of an English word, whichever of the two is known."""
+        level = data.get("cefr_level", "")
+        band = data.get("frequency_band", "")
+        per_million = data.get("frequency_per_million")
+        if not (level or band):
+            return None
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        if level:
+            badge = QLabel(level)
+            badge.setObjectName("LevelBadge")
+            badge.setToolTip(f"CEFR level {level} (CEFR-J Wordlist / Octanove vocabulary profile)")
+            row.addWidget(badge)
+        if band:
+            badge = QLabel(band)
+            badge.setObjectName("FrequencyBadge")
+            badge.setToolTip(f"About {per_million:g} occurrences per million words (Datamuse)" if per_million is not None else band)
+            row.addWidget(badge)
+        row.addStretch(1)
+        return row
 
     def _highlight_phrase(self, sentence: str, phrase: str) -> str:
         accent = THEME_COLORS["accent"]
@@ -138,18 +163,21 @@ class ResultsPage(QWidget):
         b_lay.addLayout(top_row)
 
         if ex_en:
-            ex_row = QHBoxLayout()
-            ex_row.setSpacing(10)
-            ex_row.addWidget(self._create_audio_button(ex_en))
-
-            ex_col = QVBoxLayout()
-            ex_col.setSpacing(3)
-
             ex_lbl = QLabel(self._highlight_phrase(ex_en, term))
             ex_lbl.setWordWrap(True)
             ex_lbl.setTextFormat(Qt.TextFormat.RichText)
             ex_lbl.setObjectName("BodyText")
             ex_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+            ex_row = QHBoxLayout()
+            ex_row.setSpacing(10)
+            # Reading the example aloud highlights each word in ex_lbl as it is spoken.
+            ex_row.addWidget(create_audio_button(
+                ex_en, self.main_win.speaker, self.main_win.settings,
+                on_click=lambda lbl=ex_lbl, t=ex_en: self.example_highlighter.speak(lbl, t)))
+
+            ex_col = QVBoxLayout()
+            ex_col.setSpacing(3)
             ex_col.addWidget(ex_lbl)
 
             if ex_ipa:
@@ -259,8 +287,24 @@ class ResultsPage(QWidget):
         self.cards_layout.addWidget(card)
         self.cards_layout.addStretch()
 
+    def _add_all_sources_off_notice(self) -> None:
+        """Explain the empty definitions when every dictionary source is switched off in Settings
+        (a separate case from offline-only mode, which leaves the bundled sources on)."""
+        card, vbox, _ = self._create_glass_card("All dictionary sources are turned off")
+        msg = QLabel("No dictionary source was used for this word, so there are no definitions, synonyms or examples. "
+                     "Turn some back on under Menu > Settings > Dictionary sources.")
+        msg.setObjectName("BodyText")
+        msg.setWordWrap(True)
+        vbox.addWidget(msg)
+        self.cards_layout.addWidget(card)
+
     def render(self, query_term: str, data: Dict[str, Any]) -> None:
         self._clear_cards()
+        if lexical_engine.is_offline_only():
+            badge = QLabel("Offline-only mode \u2014 results use only your history, Ocean's bundled lexicon and the offline translator")
+            badge.setObjectName("OfflineBadge")
+            badge.setWordWrap(True)
+            self.cards_layout.addWidget(badge)
         if data.get("is_reverse"):
             self._render_reverse_result(query_term, data)
             return
@@ -283,6 +327,9 @@ class ResultsPage(QWidget):
             dym_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             dym_btn.clicked.connect(lambda _, w=did_you_mean: self.main_win._analyze_input(False, w))
             self.cards_layout.addWidget(dym_btn)
+
+        if not is_sentence and not senses and not dictionary_sources.REGISTRY.any_enabled():
+            self._add_all_sources_off_notice()
 
         # --- SECTION 1: Overview & Definitions (No Emoji on Deep Search!) ---
         card1_title = "1. Sentence Analysis & Translation" if is_sentence else "1. Overview & Definitions"
@@ -367,6 +414,9 @@ class ResultsPage(QWidget):
             hw_lay.addWidget(self._create_persian_widget(fa_equiv, en_source=headword, large=True), stretch=1)
 
         vbox1.addWidget(hw_box)
+        badge_row = self._create_level_badges(data)
+        if badge_row is not None:
+            vbox1.addLayout(badge_row)
 
         for idx, s_item in enumerate(senses, start=1):
             s_box = SmoothGlassFrame(radius=18, variant="inner")
@@ -390,18 +440,20 @@ class ResultsPage(QWidget):
             s_vbox.addWidget(def_lbl)
 
             if ex_en:
-                ex_row = QHBoxLayout()
-                ex_row.setSpacing(10)
-                ex_row.addWidget(self._create_audio_button(ex_en))
-
-                ex_col = QVBoxLayout()
-                ex_col.setSpacing(3)
-
                 en_sent_lbl = QLabel(self._highlight_phrase(ex_en, headword))
                 en_sent_lbl.setWordWrap(True)
                 en_sent_lbl.setTextFormat(Qt.TextFormat.RichText)
                 en_sent_lbl.setObjectName("BodyText")
                 en_sent_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+                ex_row = QHBoxLayout()
+                ex_row.setSpacing(10)
+                ex_row.addWidget(create_audio_button(
+                    ex_en, self.main_win.speaker, self.main_win.settings,
+                    on_click=lambda lbl=en_sent_lbl, t=ex_en: self.example_highlighter.speak(lbl, t)))
+
+                ex_col = QVBoxLayout()
+                ex_col.setSpacing(3)
                 ex_col.addWidget(en_sent_lbl)
 
                 if ex_ipa:
