@@ -16,6 +16,13 @@ LINUX
   ./run.sh              start the app
   ./build_linux.sh      optional portable build in dist/Ocean/
 
+PERSIAN -> ENGLISH
+  Type Persian in the search box to find English words: Ocean shows the
+  English translation and clickable English candidates (from your history,
+  your own fixes and taught words, Ocean's idiom list, and Google). Click a
+  candidate to open its full English entry. Offline, the bundled NLLB model
+  translates (lower quality).
+
 REVIEW (SPACED REPETITION)
   Words you save with the star button become flashcards. Open Review from the
   home screen or the menu: Space shows the answer, keys 1-4 grade it

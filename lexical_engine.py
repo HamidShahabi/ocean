@@ -183,42 +183,50 @@ def query_offline_bnc_collocations(headword: str) -> List[Dict[str, str]]:
         return []
 
 
+def _ct2_translate(text: str, to_english: bool = False) -> str:
+    """Raw offline translation with the CTranslate2 model (EN->FA, or FA->EN with an NLLB model)."""
+    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB
+    if not HAS_CT2_BACKUP:
+        return ""
+    try:
+        if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
+            sp_p = os.path.join(OFFLINE_MT_DIR, "sentencepiece.model")
+            md_p = os.path.join(OFFLINE_MT_DIR, "model")
+            if os.path.exists(sp_p) and os.path.isdir(md_p):
+                _SP_PROCESSOR = spm.SentencePieceProcessor(model_file=sp_p)
+                _CT2_TRANSLATOR = ctranslate2.Translator(md_p, device="cpu", compute_type="int8")
+                vocab_p = os.path.join(md_p, "shared_vocabulary.txt")
+                if os.path.exists(vocab_p):
+                    with open(vocab_p, encoding="utf-8") as vf:
+                        _CT2_IS_NLLB = any(line.strip() == "pes_Arab" for line in vf)
+        if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
+            return ""
+        tokens = _SP_PROCESSOR.encode(text, out_type=str)
+        if _CT2_IS_NLLB:
+            src, tgt = ("pes_Arab", "eng_Latn") if to_english else ("eng_Latn", "pes_Arab")
+            res = _CT2_TRANSLATOR.translate_batch([[src] + tokens + ["</s>"]], target_prefix=[[tgt]], beam_size=2)
+            out_tokens = res[0].hypotheses[0][1:]
+        elif to_english:
+            return ""  # a Marian-style model translates one direction only
+        else:
+            res = _CT2_TRANSLATOR.translate_batch([tokens], beam_size=2)
+            out_tokens = res[0].hypotheses[0]
+        return _SP_PROCESSOR.decode(out_tokens).strip()
+    except Exception:
+        _log_failure(f"Offline translator failed for {text!r}")
+        return ""
+
+
 def translate_offline_backup(text: str, is_short: bool = False) -> str:
     """Used strictly as a backup when internet connection is unavailable."""
-    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB
     clean = text.strip()
     if not clean:
         return ""
     db_hit = query_offline_core_lexicon(clean.lower())
     if db_hit:
         return normalize_persian(db_hit, is_short_term=is_short, source_en=clean)
-    if HAS_CT2_BACKUP:
-        try:
-            if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
-                sp_p = os.path.join(OFFLINE_MT_DIR, "sentencepiece.model")
-                md_p = os.path.join(OFFLINE_MT_DIR, "model")
-                if os.path.exists(sp_p) and os.path.isdir(md_p):
-                    _SP_PROCESSOR = spm.SentencePieceProcessor(model_file=sp_p)
-                    _CT2_TRANSLATOR = ctranslate2.Translator(md_p, device="cpu", compute_type="int8")
-                    vocab_p = os.path.join(md_p, "shared_vocabulary.txt")
-                    if os.path.exists(vocab_p):
-                        with open(vocab_p, encoding="utf-8") as vf:
-                            _CT2_IS_NLLB = any(line.strip() == "pes_Arab" for line in vf)
-            if _CT2_TRANSLATOR is not None and _SP_PROCESSOR is not None:
-                tokens = _SP_PROCESSOR.encode(clean, out_type=str)
-                if _CT2_IS_NLLB:
-                    res = _CT2_TRANSLATOR.translate_batch(
-                        [["eng_Latn"] + tokens + ["</s>"]], target_prefix=[["pes_Arab"]], beam_size=2
-                    )
-                    out_tokens = res[0].hypotheses[0][1:]
-                else:
-                    res = _CT2_TRANSLATOR.translate_batch([tokens], beam_size=2)
-                    out_tokens = res[0].hypotheses[0]
-                decoded = _SP_PROCESSOR.decode(out_tokens)
-                return normalize_persian(decoded, is_short_term=is_short, source_en=clean)
-        except Exception:
-            _log_failure(f"Offline translator failed for {clean!r}")
-    return ""
+    decoded = _ct2_translate(clean)
+    return normalize_persian(decoded, is_short_term=is_short, source_en=clean) if decoded else ""
 
 
 def save_user_memory() -> None:
@@ -758,28 +766,31 @@ def substitute_idiom_in_sentence(sentence: str, idiom: str, meaning_en: str) -> 
     return sentence
 
 
-def translate_via_clients5(text: str, is_short: bool = False) -> str:
-    clean = text.strip()
-    if not clean:
-        return ""
+def _clients5(text: str, source: str, target: str) -> str:
+    """Raw single-best translation from Google's dictionary-extension endpoint."""
     try:
         r = smart_request(
             "GET",
             "https://clients5.google.com/translate_a/t",
-            params={"client": "dict-chrome-ex", "sl": "en", "tl": "fa", "q": clean},
+            params={"client": "dict-chrome-ex", "sl": source, "tl": target, "q": text},
             timeout=3.0,
         )
         if r.ok:
             data = r.json()
             if isinstance(data, list) and data:
                 first = data[0]
-                raw = first[0] if isinstance(first, list) else str(first)
-                norm = normalize_persian(raw, is_short_term=is_short, source_en=clean)
-                if norm:
-                    return norm
+                return (first[0] if isinstance(first, list) else str(first)).strip()
     except Exception:
-        _log_failure(f"Google clients5 translation failed for {clean!r}")
+        _log_failure(f"Google clients5 translation ({source}->{target}) failed for {text!r}")
     return ""
+
+
+def translate_via_clients5(text: str, is_short: bool = False) -> str:
+    clean = text.strip()
+    if not clean:
+        return ""
+    raw = _clients5(clean, "en", "fa")
+    return normalize_persian(raw, is_short_term=is_short, source_en=clean) if raw else ""
 
 
 def translate_single_string(text: str, is_short: bool = False) -> str:
@@ -1057,6 +1068,8 @@ def fetch_live_suggestions(prefix: str) -> List[str]:
         return []
     user_keys = [k for k in USER_MEMORY.get("entries", {}) if k.startswith(q.lower())]
     local_idioms = [k for k in OFFLINE_LEXICON.get("idioms", {}) if k.startswith(q.lower())]
+    if is_persian_text(q):
+        return []  # Datamuse is English-only; the app still offers matching history entries
     try:
         r = smart_request("GET", "https://api.datamuse.com/sug", params={"s": q, "max": 7}, timeout=1.2)
         if r.ok:
@@ -1445,8 +1458,127 @@ def is_similar_def(d1: str, d2: str) -> bool:
 
 
 # === SECTION 8: MASTER UNIFIED HYBRID LEXICAL & SENTENCE ANALYZER ===
+# === PERSIAN -> ENGLISH (REVERSE) LOOKUP ===
+_PERSIAN_LETTER = re.compile(r"[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]")
+_LATIN_LETTER = re.compile(r"[A-Za-z]")
+_ARABIC_DIACRITICS = re.compile(r"[\u064B-\u065F\u0670\u0640]")  # harakat, superscript alef, tatweel
+MAX_REVERSE_CANDIDATES = 12
+
+
+def is_persian_text(text: str) -> bool:
+    """Mostly Persian/Arabic-script letters (mixed input follows the majority script)."""
+    return len(_PERSIAN_LETTER.findall(text)) > len(_LATIN_LETTER.findall(text))
+
+
+def fa_key(text: str) -> str:
+    """Comparison key: Arabic-keyboard letter variants unified, diacritics and edge punctuation removed."""
+    text = _ARABIC_DIACRITICS.sub("", text.replace("\u064a", "\u06cc").replace("\u0643", "\u06a9"))
+    return " ".join(text.replace("\u200c", " ").split()).strip(" .!?\u061f\u060c,\u061b;:\"'()")
+
+
+def reverse_lookup_local(fa: str) -> List[str]:
+    """English terms whose stored Persian meaning matches: your fixes and taught words first,
+    then Ocean's bundled lexicon. Meanings are compared per comma-separated part."""
+    target = fa_key(fa)
+    if not target:
+        return []
+    pairs = list(USER_MEMORY.get("overrides", {}).items())
+    pairs += [(en, d.get("fa", "")) for en, d in OFFLINE_LEXICON.get("idioms", {}).items()]
+    pairs += [(en, v if isinstance(v, str) else "") for en, v in OFFLINE_LEXICON.get("words", {}).items()]
+    hits = []
+    for en, fa_val in pairs:
+        if any(fa_key(part) == target for part in re.split(r"[\u060c,]", fa_val or "")):
+            hits.append(en)
+    return list(dict.fromkeys(hits))
+
+
+def _google_fa_to_en(text: str) -> Tuple[str, List[Dict[str, str]]]:
+    """(full translation, dictionary candidates grouped by part of speech) from Google's gtx endpoint."""
+    try:
+        r = smart_request(
+            "GET",
+            "https://translate.googleapis.com/translate_a/single",
+            params=[("client", "gtx"), ("sl", "fa"), ("tl", "en"), ("dt", "t"), ("dt", "bd"), ("q", text)],
+            timeout=2.8,
+        )
+        if not r.ok:
+            log.warning("Google fa->en translation for %r: HTTP %s", text, r.status_code)
+            return "", []
+        return parse_gtx_reverse(r.json())
+    except Exception:
+        _log_failure(f"Google fa->en translation failed for {text!r}")
+        return "", []
+
+
+def parse_gtx_reverse(data: Any) -> Tuple[str, List[Dict[str, str]]]:
+    translation = "".join(seg[0] for seg in (data[0] or []) if seg and seg[0]).strip() if data else ""
+    candidates = []
+    if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
+        for block in data[1]:
+            if isinstance(block, list) and len(block) > 1 and isinstance(block[1], list):
+                pos = str(block[0] or "").strip()
+                candidates += [{"term": str(t).strip(), "pos": pos} for t in block[1][:6] if str(t).strip()]
+    return translation, candidates
+
+
+def analyze_persian(raw: str) -> Dict[str, Any]:
+    """Reverse entry for Persian input: the English translation plus English candidate words."""
+    headword = " ".join(raw.split())
+    query = fa_key(headword)
+    is_sentence = len(query.split()) >= 5 or headword.endswith((".", "!", "?", "\u061f"))
+
+    translation, candidates = _google_fa_to_en(query)
+    if not translation:
+        translation = _clients5(query, "fa", "en")
+    offline = False
+    if not translation:
+        translation = _ct2_translate(query, to_english=True)
+        offline = bool(translation)
+
+    local = reverse_lookup_local(query)
+    machine = translation
+    if local and not is_sentence:
+        # Curated meanings (your fixes, taught words, Ocean's idiom list) beat literal machine output,
+        # e.g. an idiom Google translates word for word.
+        translation = local[0]
+    found = [{"term": en, "pos": "your entries & Ocean lexicon"} for en in local]
+    # Offline NLLB turns isolated words into sentences ("It's too soon."), so only online output becomes a word.
+    if machine and not offline and not is_sentence and len(machine.split()) <= 4:
+        machine_cand = machine.rstrip(".") if " " not in machine else machine
+        found.append({"term": machine_cand, "pos": "translation"})
+    seen = set()
+    merged = []
+    for cand in found + candidates:
+        key = cand["term"].lower()
+        if key not in seen and not is_persian_text(cand["term"]):
+            seen.add(key)
+            merged.append(cand)
+
+    return {
+        "headword": headword,
+        "is_reverse": True,
+        "is_sentence": is_sentence,
+        "is_idiom": False,
+        "did_you_mean": "",
+        "ipa_us": "",
+        "persian_equivalent": headword,
+        "english_translation": translation,
+        "machine_translation": machine if machine.lower() != translation.lower() else "",
+        "translation_offline": offline,
+        "candidates": merged[:MAX_REVERSE_CANDIDATES],
+        "senses": [],
+        "sentence_breakdown": [],
+        "collocations": [],
+        "morphology": {"root": headword, "structure": headword, "prefix": "None", "suffix": "None", "family": []},
+        "synonyms": [],
+        "antonyms": [],
+    }
+
+
 def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, Any]:
     raw_input = term.strip()
+    if is_persian_text(raw_input):
+        return analyze_persian(raw_input)
     words = raw_input.split()
     is_full_sentence = len(words) >= 5 or (len(words) >= 4 and raw_input.endswith((".", "!", "?")))
     clean = auto_correct_english_input(raw_input, is_sentence=is_full_sentence)
