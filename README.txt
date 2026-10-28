@@ -56,7 +56,8 @@ YOUR DATA
 OFFLINE MODE
   Online dictionaries and Google Translate are used when available. Without
   internet, Persian translation falls back to the bundled NLLB-200 model in
-  offline_mt_model\ (downloaded by the setup script).
+  offline_mt_model\ (downloaded by the setup script). The model is loaded in the
+  background right after startup, so the first offline lookup doesn't wait for it.
 
 DEVELOPMENT
   Run the tests:  .venv/bin/python -m unittest discover -s tests

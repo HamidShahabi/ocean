@@ -22,7 +22,7 @@ if (-not (Test-Path ".\ocean.ico")) {
     & ".\.venv\Scripts\python.exe" app.py --make-icon
 }
 
-& ".\.venv\Scripts\pyinstaller.exe" --noconfirm --noconsole --onedir --paths="." --hidden-import=lexical_engine --hidden-import=bs4 --hidden-import=lxml --hidden-import=kokoro_onnx --hidden-import=eng_to_ipa --hidden-import=nltk --hidden-import=ctranslate2 --hidden-import=sentencepiece --name "Ocean" --icon="ocean.ico" app.py
+& ".\.venv\Scripts\pyinstaller.exe" --noconfirm --noconsole --onedir --paths="." --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=bs4 --hidden-import=lxml --hidden-import=kokoro_onnx --hidden-import=eng_to_ipa --hidden-import=nltk --hidden-import=ctranslate2 --hidden-import=sentencepiece --name "Ocean" --icon="ocean.ico" app.py
 
 # User data (history, memory, settings) lives in %APPDATA%\Ocean, not in the build.
 foreach ($f in @("lexical_engine.py", "offline_lexicon.json", "ocean_offline_core.db")) {

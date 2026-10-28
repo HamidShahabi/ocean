@@ -61,7 +61,7 @@ class ReviewStoreTest(unittest.TestCase):
         fd, self.db = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         conn = sqlite3.connect(self.db)
-        # Same columns as app.DatabaseManager's lexicon table.
+        # Same columns as storage.HistoryStore's lexicon table.
         conn.execute("""CREATE TABLE lexicon (id INTEGER PRIMARY KEY AUTOINCREMENT, query_key TEXT UNIQUE NOT NULL,
                         display_term TEXT NOT NULL, payload TEXT NOT NULL, is_favorite INTEGER DEFAULT 0,
                         updated_at TEXT NOT NULL)""")
