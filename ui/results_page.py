@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 )
 
 import lexical_engine
+from ui.highlight import ExampleHighlighter
 from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS
 from ui.widgets import PersianTranslationWidget, SmoothGlassFrame, create_audio_button
 
@@ -29,6 +30,7 @@ class ResultsPage(QWidget):
     def __init__(self, main_win: "MainWindow") -> None:
         super().__init__()
         self.main_win = main_win
+        self.example_highlighter = ExampleHighlighter(main_win.speaker)
         self.setObjectName('ResultsPage')
         res_vbox = QVBoxLayout(self)
         res_vbox.setContentsMargins(0, 0, 0, 0)
@@ -138,18 +140,21 @@ class ResultsPage(QWidget):
         b_lay.addLayout(top_row)
 
         if ex_en:
-            ex_row = QHBoxLayout()
-            ex_row.setSpacing(10)
-            ex_row.addWidget(self._create_audio_button(ex_en))
-
-            ex_col = QVBoxLayout()
-            ex_col.setSpacing(3)
-
             ex_lbl = QLabel(self._highlight_phrase(ex_en, term))
             ex_lbl.setWordWrap(True)
             ex_lbl.setTextFormat(Qt.TextFormat.RichText)
             ex_lbl.setObjectName("BodyText")
             ex_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+            ex_row = QHBoxLayout()
+            ex_row.setSpacing(10)
+            # Reading the example aloud highlights each word in ex_lbl as it is spoken.
+            ex_row.addWidget(create_audio_button(
+                ex_en, self.main_win.speaker, self.main_win.settings,
+                on_click=lambda lbl=ex_lbl, t=ex_en: self.example_highlighter.speak(lbl, t)))
+
+            ex_col = QVBoxLayout()
+            ex_col.setSpacing(3)
             ex_col.addWidget(ex_lbl)
 
             if ex_ipa:
@@ -390,18 +395,20 @@ class ResultsPage(QWidget):
             s_vbox.addWidget(def_lbl)
 
             if ex_en:
-                ex_row = QHBoxLayout()
-                ex_row.setSpacing(10)
-                ex_row.addWidget(self._create_audio_button(ex_en))
-
-                ex_col = QVBoxLayout()
-                ex_col.setSpacing(3)
-
                 en_sent_lbl = QLabel(self._highlight_phrase(ex_en, headword))
                 en_sent_lbl.setWordWrap(True)
                 en_sent_lbl.setTextFormat(Qt.TextFormat.RichText)
                 en_sent_lbl.setObjectName("BodyText")
                 en_sent_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+                ex_row = QHBoxLayout()
+                ex_row.setSpacing(10)
+                ex_row.addWidget(create_audio_button(
+                    ex_en, self.main_win.speaker, self.main_win.settings,
+                    on_click=lambda lbl=en_sent_lbl, t=ex_en: self.example_highlighter.speak(lbl, t)))
+
+                ex_col = QVBoxLayout()
+                ex_col.setSpacing(3)
                 ex_col.addWidget(en_sent_lbl)
 
                 if ex_ipa:

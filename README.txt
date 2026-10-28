@@ -23,6 +23,14 @@ PERSIAN -> ENGLISH
   candidate to open its full English entry. Offline, the bundled NLLB model
   translates (lower quality).
 
+READ EXAMPLES ALOUD
+  The speaker button next to an example sentence reads it aloud and highlights
+  each word as it is spoken. With the Kokoro neural voice the highlight follows
+  an estimate of each word's timing (the voice gives no word timestamps), so it
+  can be slightly off on long or unusual words. The fallback voices (Windows
+  SAPI, or spd-say / espeak on Linux) play the sentence without highlighting.
+  Playing another clip clears the highlight.
+
 REVIEW (SPACED REPETITION)
   Words you save with the star button become flashcards. Open Review from the
   home screen or the menu: Space shows the answer, keys 1-4 grade it
