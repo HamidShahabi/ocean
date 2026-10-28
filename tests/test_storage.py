@@ -27,14 +27,16 @@ class HistoryStoreTest(unittest.TestCase):
         with open(storage.__file__, encoding="utf-8") as f:
             self.assertNotIn("PyQt", f.read())
 
-    def test_schema_is_unchanged(self):
+    def test_schema_has_the_original_columns_and_the_provenance_ones(self):
         conn = sqlite3.connect(self.db_path)
         try:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(lexicon)")]
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         finally:
             conn.close()
-        self.assertEqual(cols, ["id", "query_key", "display_term", "payload", "is_favorite", "updated_at"])
+        self.assertEqual(cols[:6], ["id", "query_key", "display_term", "payload", "is_favorite", "updated_at"])
+        self.assertIn("produced_at", cols)
+        self.assertIn("engine_version", cols)
         self.assertEqual(mode, "wal")
 
     def test_save_then_get_normalises_the_key(self):

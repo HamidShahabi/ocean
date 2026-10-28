@@ -11,7 +11,7 @@ import threading
 from contextlib import closing
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -84,6 +84,11 @@ def user_data_path(filename: str) -> str:
                 os.remove(target)
     return target
 
+
+# Bump when lookups improve (new sources, better translations, fixed bugs): saved entries produced
+# by an older version get fetched again on their next lookup (see storage.is_stale).
+# Entries saved before versions were recorded count as version 0.
+ENGINE_VERSION = 1
 
 USER_MEMORY_FILE = user_data_path("user_memory.json")
 OFFLINE_LEXICON_FILE = os.path.join(ENGINE_BASE_DIR, "offline_lexicon.json")
@@ -303,6 +308,38 @@ def delete_taught_entry(term: str) -> None:
         save_user_memory()
 
 
+def apply_user_overrides(data: Dict[str, Any], overrides: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Put your manual Persian fixes (USER_MEMORY overrides, keyed by lower-case English text) back
+    into a freshly fetched entry. Lookups already honour overrides for translations they make
+    themselves; this also covers Persian that came ready-made from a dictionary source (e.g. example
+    sentences), so refreshing an entry never undoes a hand edit. Changes `data` in place."""
+    if overrides is None:
+        overrides = USER_MEMORY.get("overrides", {})
+    if not overrides:
+        return data
+
+    def fix(en: Any) -> str:
+        return overrides.get(en.strip().lower(), "") if isinstance(en, str) else ""
+
+    if not data.get("is_reverse"):
+        fa = fix(data.get("headword"))
+        if fa:
+            data["persian_equivalent"] = fa
+    for s in data.get("senses", []):
+        fa = fix(s.get("example_en"))
+        if fa:
+            s["example_fa"] = fa
+    for grp in ("collocations", "synonyms", "antonyms", "sentence_breakdown"):
+        for item in data.get(grp, []):
+            fa = fix(item.get("term"))
+            if fa:
+                item["fa"] = fa
+            fa = fix(item.get("example_en"))
+            if fa:
+                item["example_fa"] = fa
+    return data
+
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
@@ -363,6 +400,7 @@ FALSE_BOUND_STEMS = {
     "peat", "liberate", "liver", "mand", "note"
 }
 
+NOT_FOUND_FA = "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f"  # shown when no translation was found
 INVALID_FA_HEADERS = {
     "\u0645\u0639\u0646\u06cc", "\u0645\u0639\u0627\u0646\u06cc", "\u062a\u0631\u062c\u0645\u0647",
     "\u062a\u0644\u0641\u0638", "\u0645\u062a\u0631\u0627\u062f\u0641", "\u0641\u0631\u0647\u0646\u06af \u0644\u063a\u062a",
