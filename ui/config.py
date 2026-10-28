@@ -50,6 +50,7 @@ class SettingsManager:
         "speech_rate": 0,
         "voice_id": "am_michael (Male - US)",
         "theme": "Dark Mode",
+        "offline_only": False,
     }
 
     def __init__(self, path: str = SETTINGS_FILE) -> None:

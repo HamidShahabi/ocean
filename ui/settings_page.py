@@ -3,7 +3,9 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import QFormLayout, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QCheckBox, QFormLayout, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+
+import lexical_engine
 
 from ui.config import SPEED_OPTIONS, VOICE_OPTIONS
 from ui.theme import VectorIcons
@@ -51,6 +53,14 @@ class SettingsPage(QWidget):
 
         s_lay.addLayout(form)
 
+        self.offline_check = QCheckBox("Offline-only mode (no network requests at all)")
+        self.offline_check.setToolTip(
+            "Use only your history, Ocean's bundled lexicon, your own entries and the offline "
+            "translator and voice. Nothing is sent over the network."
+        )
+        self.offline_check.setChecked(bool(self.main_win.settings.data.get("offline_only", False)))
+        s_lay.addWidget(self.offline_check)
+
         self.test_voice_btn = QPushButton("  Test Voice")
         self.test_voice_btn.setObjectName("GlassPillButton")
         self.test_voice_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -85,6 +95,7 @@ class SettingsPage(QWidget):
 
     def on_show(self) -> None:
         self.theme_drop.setCurrentText(self.main_win.settings.data.get("theme", "Dark Mode"))
+        self.offline_check.setChecked(bool(self.main_win.settings.data.get("offline_only", False)))
 
     def apply_icons(self, accent: str) -> None:
         self.test_voice_btn.setIcon(VectorIcons.speaker_icon(accent))
@@ -102,6 +113,7 @@ class SettingsPage(QWidget):
         self.main_win.settings.data["font_scale"] = sel
         self.main_win.settings.data["base_font_px"] = scale_map.get(sel, 14)
         self.main_win.settings.data["learning_mode"] = self.mode_drop.currentText()
+        self.main_win.settings.data["offline_only"] = self.offline_check.isChecked()
         self.main_win.settings.data["voice_id"] = self.voice_drop.currentText()
         sp_txt = self.speed_drop.currentText().split()[0]
         try:
@@ -116,6 +128,7 @@ class SettingsPage(QWidget):
     def _apply_live(self) -> None:
         self._collect_settings()
         self.main_win.settings.save()
+        lexical_engine.set_offline_only(self.main_win.settings.data["offline_only"])
         self.main_win._apply_theme()
         if self.main_win.current_term and self.main_win.current_data:
             self.main_win.results_page.render(self.main_win.current_term, self.main_win.current_data)

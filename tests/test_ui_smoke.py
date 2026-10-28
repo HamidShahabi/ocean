@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
+import lexical_engine  # noqa: E402
 from ui import theme  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_SETTINGS, PAGE_TEACH  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
@@ -63,6 +64,11 @@ def card_texts(win):
     return texts
 
 
+def offline_badges(win):
+    layout = win.results_page.cards_layout
+    return [w for w in (layout.itemAt(i).widget() for i in range(layout.count())) if w and w.objectName() == "OfflineBadge"]
+
+
 class UiSmokeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -79,6 +85,8 @@ class UiSmokeTest(unittest.TestCase):
         for payload in (WORD, SENTENCE, REVERSE, IDIOM):
             self.win.db.delete_entry(payload["headword"])
         self.win.settings.data["theme"] = "Dark Mode"
+        self.win.settings.data["offline_only"] = False
+        lexical_engine.set_offline_only(False)
         self.win.close()
         self.win.deleteLater()
         self.app.processEvents()
@@ -156,6 +164,29 @@ class UiSmokeTest(unittest.TestCase):
             page._save_and_close()
         self.assertEqual(theme.THEME_COLORS["bg_main"], "#0E1621")
         self.assertFalse(self.win.right_drawer.isVisible())
+
+    def test_offline_only_setting_applies_to_engine_and_marks_results(self):
+        page = self.win.right_drawer.settings_page
+        self.assertFalse(page.offline_check.isChecked())
+        self.win.results_page.render("serendipity", WORD)
+        self.assertEqual(offline_badges(self.win), [])
+        page.offline_check.setChecked(True)
+        with mock.patch.object(self.win.settings, "save") as save:
+            page._apply_live()
+        self.assertTrue(save.called)
+        self.assertTrue(self.win.settings.data["offline_only"])
+        self.assertTrue(lexical_engine.is_offline_only())
+        for payload in (WORD, SENTENCE, REVERSE, IDIOM):  # applying re-renders; every kind shows the badge
+            self.win.results_page.render(payload["headword"], payload)
+            badges = offline_badges(self.win)
+            self.assertEqual(len(badges), 1, payload["headword"])
+            self.assertIn("Offline-only mode", badges[0].text())
+        page.offline_check.setChecked(False)
+        with mock.patch.object(self.win.settings, "save"):
+            page._apply_live()
+        self.assertFalse(lexical_engine.is_offline_only())
+        self.win.results_page.render("serendipity", WORD)
+        self.assertEqual(offline_badges(self.win), [])
 
     def test_teach_page_prefills_current_term(self):
         self.win._analyze_input(override_term="serendipity")

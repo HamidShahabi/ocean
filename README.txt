@@ -59,6 +59,15 @@ OFFLINE MODE
   offline_mt_model\ (downloaded by the setup script). The model is loaded in the
   background right after startup, so the first offline lookup doesn't wait for it.
 
+  Offline-only mode (Menu > Settings > "Offline-only mode", then Apply or Save)
+  makes Ocean send no network request at all, for privacy or for travelling.
+  Lookups use only your history, your own entries and fixes, the bundled
+  lexicon, WordNet and the offline NLLB translator; the Kokoro voice (and the
+  system voice fallback) already runs on your computer. Suggestions as you type
+  come from your history and entries only. Results show an "Offline-only mode"
+  notice. Expect fewer examples and synonyms, and lower-quality Persian for
+  words that are not in the bundled lexicon. The choice is remembered.
+
 DEVELOPMENT
   Run the tests:  .venv/bin/python -m unittest discover -s tests
 

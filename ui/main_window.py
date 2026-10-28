@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 import desktop_lookup
+import lexical_engine
 import storage
 from ui import theme
 from ui.config import DB_FILE, SettingsManager
@@ -47,6 +48,7 @@ class MainWindow(QMainWindow):
         self.resize(1220, 850)
 
         self.settings = SettingsManager()
+        lexical_engine.set_offline_only(bool(self.settings.data.get("offline_only")))
         self.db = storage.HistoryStore(DB_FILE)
         self.speaker = NeuralSpeaker(self.settings)
         self.current_term: Optional[str] = None

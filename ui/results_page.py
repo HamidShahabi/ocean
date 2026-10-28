@@ -261,6 +261,11 @@ class ResultsPage(QWidget):
 
     def render(self, query_term: str, data: Dict[str, Any]) -> None:
         self._clear_cards()
+        if lexical_engine.is_offline_only():
+            badge = QLabel("Offline-only mode \u2014 results use only your history, Ocean's bundled lexicon and the offline translator")
+            badge.setObjectName("OfflineBadge")
+            badge.setWordWrap(True)
+            self.cards_layout.addWidget(badge)
         if data.get("is_reverse"):
             self._render_reverse_result(query_term, data)
             return
