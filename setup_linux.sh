@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r requirements.txt
+uv pip install --python .venv/bin/python -r requirements.lock
 
 # lexical_engine.py looks in ./nltk_data first. NLTK_DATA must name the target dir
 # or newer NLTK refuses to download there ("Unauthorized path").
