@@ -208,6 +208,95 @@ class ClozeQuestionTest(unittest.TestCase):
         self.assertIn("2 usable saved words", msg)
 
 
+class ListenQuestionTest(unittest.TestCase):
+    BOOK = QuizItem("book", "book", "کتاب", {"headword": "book", "ipa_us": "/bʊk/"})
+    ICE = QuizItem("break the ice", "break the ice", "یخ را شکستن")
+
+    def questions(self, items, seed=0, count=10):
+        return quiz.new_session(items, quiz.LISTEN_MODE, random.Random(seed), count)
+
+    def test_mode_is_registered_typed_and_speaks_without_showing_the_word(self):
+        self.assertEqual(quiz.MODES[quiz.LISTEN_MODE].needs, quiz.CAP_VOICE)
+        for q in self.questions([self.BOOK, self.ICE]):
+            self.assertTrue(q.is_typed)
+            self.assertEqual(q.speak, q.answer)
+            for shown in (q.prompt, q.hint):
+                self.assertNotIn(q.answer.lower(), shown.lower())
+            self.assertNotIn("کتاب", q.prompt + q.hint)  # the meaning isn't given away before answering
+
+    def test_reveal_has_ipa_when_saved_and_the_persian_meaning(self):
+        by_key = {q.query_key: q for q in self.questions([self.BOOK, self.ICE])}
+        self.assertEqual(by_key["book"].reveal, "/bʊk/ · کتاب")
+        self.assertEqual(by_key["break the ice"].reveal, "یخ را شکستن")  # no IPA stored: just the meaning
+        reverse = QuizItem("water", "water", "آب", {"is_reverse": True, "ipa_us": "/آب/"})
+        self.assertEqual(self.questions([reverse])[0].reveal, "آب")
+
+    def test_only_single_words_and_short_phrases_are_spoken(self):
+        long_phrase = QuizItem("a", "this is a rather long phrase", "x")
+        short_sentence = QuizItem("b", "She walked home.", "x")  # four words: still a short phrase
+        odd = QuizItem("c", "water, tea", "x")
+        digits = QuizItem("d", "3d printer", "x")
+        qs = self.questions([long_phrase, odd, digits, self.BOOK, short_sentence])
+        self.assertEqual(sorted(q.answer for q in qs), ["She walked home.", "book"])
+        self.assertEqual(self.questions([long_phrase, odd, digits]), [])
+
+    def test_session_is_capped_and_repeatable(self):
+        items = [QuizItem(w, w, "x") for w in ("cat", "dog", "bird", "fish", "frog")]
+        self.assertEqual(len(self.questions(items, count=3)), 3)
+        self.assertEqual(self.questions(items, seed=2), self.questions(items, seed=2))
+
+    def test_answers_are_checked_case_insensitively(self):
+        q = self.questions([self.ICE])[0]
+        for ok in ("break the ice", "  Break  The ICE ", "BREAK THE ICE."):
+            self.assertEqual(q.grade(ok), quiz.CORRECT, ok)
+        self.assertEqual(quiz.Question("m", "p", "don't", "k").grade("DON’T"), quiz.CORRECT)
+
+    def test_one_typo_is_almost_and_not_correct(self):
+        q = self.questions([QuizItem("necessary", "necessary", "x")])[0]
+        for typo in ("neccessary", "necesary", "necessery", "necesssary", "necessray"):  # +1, -1, sub, +1, swap
+            self.assertFalse(q.is_correct(typo), typo)
+            self.assertEqual(q.grade(typo), quiz.ALMOST, typo)
+            self.assertEqual(q.near_miss_of(typo), "necessary")
+        for far in ("neccesary", "necesar", "recessery", "", "   "):  # two edits, or nothing
+            self.assertEqual(q.grade(far), quiz.WRONG, far)
+        self.assertEqual(q.grade("Necessary"), quiz.CORRECT)
+
+    def test_short_words_get_no_typo_tolerance(self):
+        qs = self.questions([QuizItem("form", "form", "x"), QuizItem("house", "house", "x")])
+        by_answer = {x.answer: x for x in qs}
+        self.assertEqual(by_answer["form"].grade("from"), quiz.WRONG)  # a different real word
+        self.assertEqual(by_answer["form"].grade("fom"), quiz.WRONG)
+        self.assertEqual(by_answer["house"].grade("hous"), quiz.ALMOST)  # five letters: tolerance starts
+
+    def test_other_modes_never_report_almost(self):
+        q = quiz.Question("x", "p", "necessary", "k")
+        self.assertEqual(q.grade("neccessary"), quiz.WRONG)
+        self.assertEqual(q.near_miss_of("neccessary"), "")
+
+    def test_within_one_edit(self):
+        for a, b in (("cat", "cat"), ("cat", "cut"), ("cat", "ct"), ("cat", "cats"), ("cat", "act"), ("abcd", "abdc"), ("", "a")):
+            self.assertTrue(quiz.within_one_edit(a, b), (a, b))
+            self.assertTrue(quiz.within_one_edit(b, a), (b, a))
+        for a, b in (("cat", "dog"), ("cat", "tac"), ("cat", "c"), ("abcd", "badc"), ("abc", "xbcde"), ("abc", "bca")):
+            self.assertFalse(quiz.within_one_edit(a, b), (a, b))
+
+    def test_missing_voice_explains_and_loading_voice_waits(self):
+        mode = quiz.LISTEN_MODE
+        self.assertEqual(quiz.missing_capability(mode, {quiz.CAP_VOICE}), "")
+        none = quiz.missing_capability(mode, set())
+        self.assertIn("needs a voice", none)
+        self.assertIn("Kokoro", none)
+        loading = quiz.missing_capability(mode, set(), {quiz.CAP_VOICE})
+        self.assertIn("still loading", loading)
+        self.assertNotEqual(loading, none)
+        self.assertEqual(quiz.missing_capability(quiz.CHOICE_MODE, set()), "")  # modes without a need are unaffected
+        self.assertEqual(quiz.missing_capability(quiz.CLOZE_MODE, set(), {quiz.CAP_VOICE}), "")
+
+    def test_no_saved_words_gives_a_helpful_message(self):
+        self.assertEqual(self.questions([]), [])
+        self.assertIn("single words or short phrases", quiz.unavailable_message(quiz.LISTEN_MODE, 0))
+
+
 class ModeRegistryTest(unittest.TestCase):
     def test_new_modes_plug_in_through_the_registry(self):
         def generate(items, rng, count):

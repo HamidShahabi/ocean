@@ -57,6 +57,22 @@ QUIZ
   without an example sentence that contains the word are skipped. Typed answers
   do not change your Review schedule either.
 
+  Listen and type: Ocean says one of your saved words out loud (with the voice
+  chosen in Settings) and you type it. The word plays by itself when each
+  question appears; press Ctrl+R or the Replay button to hear it again (Ctrl+R
+  works while you are typing). The screen never shows the word or its meaning
+  before you answer; afterwards it shows the word, its IPA (if saved) and the
+  Persian meaning. Answers ignore upper/lower case and extra spaces. This is a
+  spelling exercise, so a typo is not accepted: for words of five or more
+  letters, an answer one typo away (a missing, extra or wrong letter, or two
+  neighbouring letters swapped) is marked "Almost - correct spelling: ..." but
+  still counts as a miss in the score. Only single words and short phrases (up
+  to four words) are used. The mode needs a voice: the Kokoro voice, or a
+  system voice (Windows speech, spd-say or espeak-ng on Linux). Without one it
+  explains why instead of starting; while Kokoro is still loading at start-up
+  it waits and begins by itself. Speech stops when you leave the quiz. Like the
+  other modes, it does not change your Review schedule.
+
 HISTORY SEARCH AND SORTING
   Menu > History has a search box that filters as you type, in English or
   Persian (it matches the word and its Persian meaning; Arabic and Persian
