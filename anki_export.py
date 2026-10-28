@@ -16,6 +16,8 @@ def _esc(text: str) -> str:
 
 
 def entry_kind(payload: Dict[str, Any]) -> str:
+    if payload.get("is_reverse"):
+        return "persian"
     if payload.get("is_sentence"):
         return "sentence"
     return "idiom" if len(str(payload.get("headword", "")).split()) >= 2 else "word"
@@ -25,6 +27,13 @@ def note_fields(payload: Dict[str, Any]) -> Tuple[str, str, str]:
     """(Front, Back, Tags) for one saved lexicon entry."""
     front = _esc(payload.get("headword", ""))
     kind = entry_kind(payload)
+    if kind == "persian":
+        # Persian -> English card: the translation, then English candidate words.
+        back = f"<b>{_esc(payload.get('english_translation', ''))}</b>"
+        words = [c.get("term", "") for c in payload.get("candidates", [])[:6] if c.get("term")]
+        if words:
+            back += f"<p>{_esc(', '.join(words))}</p>"
+        return front, back, "ocean ocean::persian"
 
     back: List[str] = []
     ipa = payload.get("ipa_us", "")

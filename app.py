@@ -503,6 +503,28 @@ class DatabaseManager:
             conn.execute("DELETE FROM lexicon WHERE query_key = ?", (key,))
             conn.commit()
 
+    def english_entries_with_persian(self, fa: str, limit: int = 8) -> List[str]:
+        """English entries in your history whose Persian meaning (any comma-separated part) matches `fa`."""
+        target = lexical_engine.fa_key(fa)
+        if not target:
+            return []
+        with self._get_conn() as conn:
+            rows = conn.execute("SELECT display_term, payload FROM lexicon ORDER BY updated_at DESC").fetchall()
+        matches = []
+        for term, payload in rows:
+            try:
+                data = json.loads(payload)
+            except ValueError:
+                continue
+            if data.get("is_reverse"):
+                continue
+            parts = re.split(r"[\u060c,]", data.get("persian_equivalent", "") or "")
+            if any(lexical_engine.fa_key(p) == target for p in parts):
+                matches.append(term)
+                if len(matches) >= limit:
+                    break
+        return matches
+
     def list_entries(self, favorites_only: bool = False) -> List[Dict[str, Any]]:
         query = "SELECT query_key, display_term, is_favorite, updated_at FROM lexicon"
         if favorites_only:
@@ -1579,10 +1601,24 @@ class ReviewPage(QWidget):
         ipa = card.payload.get("ipa_us", "")
         self.ipa_label.setText(ipa)
         self.ipa_label.setVisible(bool(ipa) and not card.payload.get("is_sentence"))
-        self.audio_btn = self.main_win._create_audio_button(self.term_label.text())
-        self.front_row.addWidget(self.audio_btn, alignment=Qt.AlignmentFlag.AlignTop)
         self.show_btn.show()
         self.done_label.hide()
+
+        if card.payload.get("is_reverse"):
+            # Persian on the front (no English voice for it), English on the back.
+            self.fa_label.hide()
+            translation = card.payload.get("english_translation", "")
+            words = ", ".join(t for t in (c.get("term", "") for c in card.payload.get("candidates", [])[:6])
+                              if t and t.lower() != translation.lower())
+            answer = [f"<b>{html.escape(translation)}</b>"]
+            if words:
+                answer.append(html.escape(words))
+            self.def_label.setText("<br>".join(answer))
+            self.def_label.show()
+            return
+        self.fa_label.show()
+        self.audio_btn = self.main_win._create_audio_button(self.term_label.text())
+        self.front_row.addWidget(self.audio_btn, alignment=Qt.AlignmentFlag.AlignTop)
 
         self.fa_label.setText(card.payload.get("persian_equivalent", ""))
         # The Persian meaning is the answer: larger than the theme's body size.
@@ -1867,7 +1903,7 @@ class MainWindow(QMainWindow):
 
         self.input_box = QLineEdit()
         self.input_box.setObjectName("SearchInput")
-        self.input_box.setPlaceholderText("Search any English word, idiom, collocation, or sentence...")
+        self.input_box.setPlaceholderText("Search English or Persian: a word, idiom, collocation, or sentence...")
         self.input_box.setMinimumHeight(36)
         self.input_box.returnPressed.connect(lambda: self._analyze_input(force_refresh=False))
         sc_lay.addWidget(self.input_box, stretch=1)
@@ -2245,8 +2281,103 @@ class MainWindow(QMainWindow):
         return box
 
     # === SECTION 9: STRUCTURED RESULT RENDERER (SUPPORTS BOTH WORD/IDIOM & FULL-SENTENCE STACKED LAYOUT) ===
+    def _render_reverse_result(self, query_term: str, data: Dict[str, Any]) -> None:
+        """Persian input: the English translation and clickable English candidates."""
+        headword = data.get("headword", query_term)
+        translation = data.get("english_translation", "")
+        is_sentence = bool(data.get("is_sentence"))
+        px = int(self.settings.data.get("base_font_px", 14))
+
+        card, vbox, header = self._create_glass_card("1. Persian \u2192 English")
+        ref_btn = QPushButton("Refresh")
+        ref_btn.setObjectName("GlassPillButton")
+        ref_btn.setFixedHeight(34)
+        ref_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        ref_btn.clicked.connect(lambda: self._analyze_input(True))
+        header.addWidget(ref_btn)
+
+        hw_box = SmoothGlassFrame(radius=18, variant="inner")
+        hw_vbox = QVBoxLayout(hw_box)
+        hw_vbox.setContentsMargins(20, 16, 20, 16)
+        hw_vbox.setSpacing(10)
+        fa_lbl = QLabel(headword)
+        fa_lbl.setObjectName("PersianText")
+        fa_lbl.setStyleSheet(f"font-size: {px + (8 if is_sentence else 14)}px; font-weight: 700;")
+        fa_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        fa_lbl.setAlignment(PERSIAN_ALIGNMENT)
+        fa_lbl.setWordWrap(True)
+        fa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        hw_vbox.addWidget(fa_lbl)
+
+        if translation:
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            row.addWidget(self._create_audio_button(translation), 0, Qt.AlignmentFlag.AlignTop)
+            en_lbl = QLabel(translation)
+            en_lbl.setObjectName("SentenceTitle")
+            en_lbl.setWordWrap(True)
+            en_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            row.addWidget(en_lbl, 1)
+            if is_sentence:
+                explore = QPushButton("Analyze in English")
+                explore.setObjectName("GlassPillButton")
+                explore.setFixedHeight(34)
+                explore.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                explore.clicked.connect(lambda _, t=translation: self._analyze_input(False, t))
+                row.addWidget(explore, 0, Qt.AlignmentFlag.AlignTop)
+            hw_vbox.addLayout(row)
+        else:
+            none_lbl = QLabel("No English translation found (no internet and no local match).")
+            none_lbl.setObjectName("MutedText")
+            hw_vbox.addWidget(none_lbl)
+        if data.get("machine_translation"):
+            mt_lbl = QLabel(f"Machine translation: {data['machine_translation']}")
+            mt_lbl.setObjectName("MutedText")
+            mt_lbl.setWordWrap(True)
+            hw_vbox.addWidget(mt_lbl)
+        if data.get("translation_offline"):
+            off_lbl = QLabel("Offline translation (lower quality)")
+            off_lbl.setObjectName("MutedText")
+            hw_vbox.addWidget(off_lbl)
+        vbox.addWidget(hw_box)
+
+        groups: Dict[str, List[str]] = {}
+        seen = set()
+        sources = [("your history", t) for t in self.db.english_entries_with_persian(headword)]
+        sources += [(c.get("pos") or "other", c.get("term", "")) for c in data.get("candidates", [])]
+        for group, term in sources:
+            if term and term.lower() not in seen:
+                seen.add(term.lower())
+                groups.setdefault(group, []).append(term)
+        if groups:
+            cand_box = SmoothGlassFrame(radius=18, variant="inner")
+            cand_vbox = QVBoxLayout(cand_box)
+            cand_vbox.setContentsMargins(20, 14, 20, 14)
+            cand_vbox.setSpacing(10)
+            hint = QLabel("English words \u2014 click one to open its full entry")
+            hint.setObjectName("MutedText")
+            cand_vbox.addWidget(hint)
+            for group, terms in groups.items():
+                row = QHBoxLayout()
+                row.setSpacing(8)
+                g_lbl = QLabel(group)
+                g_lbl.setObjectName("BodyText")
+                g_lbl.setMinimumWidth(170)
+                row.addWidget(g_lbl)
+                for term in terms:
+                    row.addWidget(self._create_clickable_word_link(term))
+                row.addStretch()
+                cand_vbox.addLayout(row)
+            vbox.addWidget(cand_box)
+
+        self.cards_layout.addWidget(card)
+        self.cards_layout.addStretch()
+
     def _render_result(self, query_term: str, data: Dict[str, Any]) -> None:
         self._clear_cards()
+        if data.get("is_reverse"):
+            self._render_reverse_result(query_term, data)
+            return
 
         headword = data.get("headword", query_term)
         is_sentence = bool(data.get("is_sentence", False)) or len(headword.split()) >= 5
