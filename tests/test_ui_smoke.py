@@ -13,10 +13,11 @@ os.environ["XDG_DATA_HOME"] = _DATA
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from PyQt6.QtCore import QObject, Qt, pyqtSignal  # noqa: E402
+from PyQt6.QtCore import QCoreApplication, QEvent, QObject, Qt, pyqtSignal  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
+import dictionary_sources  # noqa: E402
 import lexical_engine  # noqa: E402
 from ui import theme  # noqa: E402
 from ui.config import DB_FILE  # noqa: E402
@@ -80,6 +81,11 @@ def card_texts(win):
     return texts
 
 
+def offline_badges(win):
+    layout = win.results_page.cards_layout
+    return [w for w in (layout.itemAt(i).widget() for i in range(layout.count())) if w and w.objectName() == "OfflineBadge"]
+
+
 class UiSmokeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -98,6 +104,10 @@ class UiSmokeTest(unittest.TestCase):
         for payload in (WORD, SENTENCE, REVERSE, IDIOM):
             self.win.db.delete_entry(payload["headword"])
         self.win.settings.data["theme"] = "Dark Mode"
+        self.win.settings.data["offline_only"] = False
+        lexical_engine.set_offline_only(False)
+        self.win.settings.data["disabled_sources"] = []
+        self.win.settings.apply_sources()
         self.win.close()
         self.win.deleteLater()
         self.app.processEvents()
@@ -236,6 +246,70 @@ class UiSmokeTest(unittest.TestCase):
             page._save_and_close()
         self.assertEqual(theme.THEME_COLORS["bg_main"], "#0E1621")
         self.assertFalse(self.win.right_drawer.isVisible())
+
+    def test_offline_only_setting_applies_to_engine_and_marks_results(self):
+        page = self.win.right_drawer.settings_page
+        self.assertFalse(page.offline_check.isChecked())
+        self.win.results_page.render("serendipity", WORD)
+        self.assertEqual(offline_badges(self.win), [])
+        page.offline_check.setChecked(True)
+        with mock.patch.object(self.win.settings, "save") as save:
+            page._apply_live()
+        self.assertTrue(save.called)
+        self.assertTrue(self.win.settings.data["offline_only"])
+        self.assertTrue(lexical_engine.is_offline_only())
+        for payload in (WORD, SENTENCE, REVERSE, IDIOM):  # applying re-renders; every kind shows the badge
+            self.win.results_page.render(payload["headword"], payload)
+            badges = offline_badges(self.win)
+            self.assertEqual(len(badges), 1, payload["headword"])
+            self.assertIn("Offline-only mode", badges[0].text())
+        page.offline_check.setChecked(False)
+        with mock.patch.object(self.win.settings, "save"):
+            page._apply_live()
+        self.assertFalse(lexical_engine.is_offline_only())
+        self.win.results_page.render("serendipity", WORD)
+        self.assertEqual(offline_badges(self.win), [])
+
+    def test_settings_lists_every_source_and_applies_the_toggles(self):
+        registry = dictionary_sources.REGISTRY
+        page = self.win.right_drawer.settings_page
+        self.assertEqual(list(page.source_checks), registry.names())
+        self.assertTrue(all(box.isChecked() for box in page.source_checks.values()))
+        for source in registry.all():
+            self.assertIn(source.label, page.source_checks[source.name].text())
+        page.source_checks["cambridge"].setChecked(False)
+        page.source_checks["wordnet"].setChecked(False)
+        with mock.patch.object(self.win.settings, "save") as save:
+            page._apply_live()
+        self.assertTrue(save.called)
+        self.assertEqual(self.win.settings.data["disabled_sources"], ["cambridge", "wordnet"])
+        self.assertEqual(registry.disabled_names(), ["cambridge", "wordnet"])
+        page.source_checks["cambridge"].setChecked(True)
+        with mock.patch.object(self.win.settings, "save"):
+            page._apply_live()
+        self.assertEqual(registry.disabled_names(), ["wordnet"])
+        # Reopening the page drops ticks that were never applied.
+        page.source_checks["longman"].setChecked(False)
+        page.on_show()
+        self.assertTrue(page.source_checks["longman"].isChecked())
+        self.assertFalse(page.source_checks["wordnet"].isChecked())
+
+    def test_a_clear_message_shows_only_when_every_source_is_off(self):
+        registry = dictionary_sources.REGISTRY
+        empty = {"headword": "serendipity", "persian_equivalent": "x", "senses": []}
+        self.win.results_page.render("serendipity", empty)
+        self.assertNotIn("All dictionary sources are turned off", card_texts(self.win))
+        for name in registry.names():
+            registry.set_enabled(name, False)
+        self.win.results_page.render("serendipity", empty)
+        self.assertIn("All dictionary sources are turned off", card_texts(self.win))
+        self.assertTrue(any("Settings > Dictionary sources" in t for t in card_texts(self.win)))
+        # Entries with definitions (e.g. saved ones) and one source left on need no notice.
+        self.win.results_page.render("serendipity", WORD)
+        self.assertNotIn("All dictionary sources are turned off", card_texts(self.win))
+        registry.set_enabled("wordnet", True)
+        self.win.results_page.render("serendipity", empty)
+        self.assertNotIn("All dictionary sources are turned off", card_texts(self.win))
 
     def test_teach_page_prefills_current_term(self):
         self.win._analyze_input(override_term="serendipity")
@@ -394,6 +468,94 @@ class UiSmokeTest(unittest.TestCase):
         self.win.results_page.render("serendipity", WORD)
         buttons = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
         self.assertIn("Reveal Persian Translation", buttons)
+
+    def _example_button_and_label(self):
+        """The audio button and sentence label of the first sense's example."""
+        example = WORD["senses"][0]["example_en"]
+        self.win.results_page.render("serendipity", WORD)
+        label = next(l for l in self.win.results_page.findChildren(QLabel) if "that we met" in l.text())
+        button = next(b for b in label.parentWidget().findChildren(QPushButton) if b.toolTip() == f"Listen: {example}")
+        return button, label
+
+    def test_playing_an_example_highlights_each_word_and_stopping_clears_it(self):
+        button, label = self._example_button_and_label()
+        original = label.text()
+        speaker = self.win.speaker
+        highlighter = self.win.results_page.example_highlighter
+        now = [0.0]
+        highlighter._clock = lambda: now[0]
+        with mock.patch.object(speaker, "speak", return_value=7) as speak:
+            button.click()
+        speak.assert_called_once_with(WORD["senses"][0]["example_en"])
+
+        speaker.clip_started.emit(7, 0.5, 3.0)  # speech starts 0.5 s in, lasts 3 s
+        self.app.processEvents()
+        self.assertNotIn("<span", label.text())  # lead-in silence: nothing highlighted yet
+
+        seen = []
+        for t in (0.6, 1.0, 2.2, 3.4):
+            now[0] = t
+            highlighter._tick()
+            self.assertIn("<span", label.text())
+            seen.append(label.text().split("<span")[1].split(">")[1].split("<")[0])
+        self.assertEqual(seen[0], "It")
+        self.assertEqual(seen[-1], "met")
+        self.assertEqual(len(set(seen)), len(seen))  # the highlight moved along
+
+        speaker.playback_stopped.emit(7)
+        self.app.processEvents()
+        self.assertEqual(label.text(), original)
+        self.assertFalse(highlighter._timer.isActive())
+
+    def test_starting_another_clip_clears_the_highlight(self):
+        button, label = self._example_button_and_label()
+        original = label.text()
+        speaker = self.win.speaker
+        with mock.patch.object(speaker, "speak", return_value=1):
+            button.click()
+        speaker.clip_started.emit(1, 0.0, 3.0)
+        self.app.processEvents()
+        self.assertNotEqual(label.text(), original)
+        speaker.clip_started.emit(2, 0.0, 1.0)  # some other clip (e.g. a headword button) starts
+        self.app.processEvents()
+        self.assertEqual(label.text(), original)
+        # A late "stopped" for the first clip must not disturb anything.
+        speaker.playback_stopped.emit(1)
+        self.assertEqual(label.text(), original)
+
+    def test_stopping_the_speaker_clears_the_highlight(self):
+        button, label = self._example_button_and_label()
+        original = label.text()
+        with mock.patch.object(self.win.speaker, "speak", return_value=1):
+            button.click()
+        self.win.speaker.clip_started.emit(1, 0.0, 3.0)
+        self.app.processEvents()
+        self.assertNotEqual(label.text(), original)
+        self.win.speaker._token = 1
+        self.win.speaker.stop()
+        self.assertEqual(label.text(), original)
+
+    def test_fallback_voice_plays_without_highlighting(self):
+        button, label = self._example_button_and_label()
+        original = label.text()
+        speaker = self.win.speaker
+        with mock.patch.object(speaker, "speak", return_value=4):
+            button.click()
+        speaker.clip_started.emit(4, 0.0, 0.0)  # SAPI / CLI voices report no duration
+        self.app.processEvents()
+        self.assertEqual(label.text(), original)
+        self.assertFalse(self.win.results_page.example_highlighter._timer.isActive())
+
+    def test_rerender_while_playing_does_not_crash(self):
+        button, label = self._example_button_and_label()
+        with mock.patch.object(self.win.speaker, "speak", return_value=1):
+            button.click()
+        self.win.speaker.clip_started.emit(1, 0.0, 3.0)
+        self.app.processEvents()
+        self.win.results_page.render("serendipity", WORD)  # the old label is deleted
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.win.results_page.example_highlighter._tick()
+        self.assertFalse(self.win.results_page.example_highlighter._timer.isActive())
 
     def _make_stale(self, term="serendipity"):
         with self.win.db._conn() as conn:
