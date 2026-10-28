@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -19,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 import anki_export
+import storage
 from ui.widgets import ModernGlassDropdown, SmoothGlassFrame
 
 if TYPE_CHECKING:
@@ -33,7 +35,7 @@ class HistoryItemRowWidget(QWidget):
     star_toggled = pyqtSignal(str, object)
     term_clicked = pyqtSignal(str)
 
-    def __init__(self, query_key: str, display_term: str, is_fav: bool) -> None:
+    def __init__(self, query_key: str, display_term: str, is_fav: bool, lookup_count: int = 1) -> None:
         super().__init__()
         self.query_key = query_key
         self.is_fav = is_fav
@@ -56,6 +58,12 @@ class HistoryItemRowWidget(QWidget):
         self.term_lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         lay.addWidget(self.term_lbl, 1)
 
+        if lookup_count > 1:
+            self.count_lbl = QLabel(f"\u00d7{lookup_count}")
+            self.count_lbl.setObjectName("MutedText")
+            self.count_lbl.setToolTip(f"Looked up {lookup_count} times")
+            lay.addWidget(self.count_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+
     def set_favorite_visual(self, fav: bool) -> None:
         self.is_fav = fav
         self.star_btn.setText("\u2605" if fav else "\u2606")
@@ -69,6 +77,9 @@ class HistoryItemRowWidget(QWidget):
         super().mouseReleaseEvent(event)
 
 
+SORT_OPTIONS = {"Most Recent": storage.SORT_RECENT, "Most Looked Up": storage.SORT_MOST_LOOKED_UP}
+
+
 class HistoryPage(QWidget):
     def __init__(self, main_win: "MainWindow") -> None:
         super().__init__()
@@ -78,9 +89,25 @@ class HistoryPage(QWidget):
         h_lay.setContentsMargins(0, 4, 0, 0)
         h_lay.setSpacing(10)
 
+        self.search_box = QLineEdit()
+        self.search_box.setObjectName("DrawerInput")
+        self.search_box.setPlaceholderText("Search history (English or \u0641\u0627\u0631\u0633\u06cc)")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setFixedHeight(36)
+        h_lay.addWidget(self.search_box)
+        # Filtering as you type re-reads the history, so wait for a short pause in typing.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self.populate)
+        self.search_box.textChanged.connect(lambda _: self._search_timer.start())
+
         self.filter_drop = ModernGlassDropdown(["All Recent Searches", "Saved Favorites Only"], "All Recent Searches", self)
         self.filter_drop.valueChanged.connect(lambda _: self.populate())
+        self.sort_drop = ModernGlassDropdown(list(SORT_OPTIONS), "Most Recent", self)
+        self.sort_drop.valueChanged.connect(lambda _: self.populate())
         h_lay.addWidget(self.filter_drop)
+        h_lay.addWidget(self.sort_drop)
 
         list_box = SmoothGlassFrame(radius=16, variant="inner")
         lb_lay = QVBoxLayout(list_box)
@@ -116,10 +143,18 @@ class HistoryPage(QWidget):
     def on_show(self) -> None:
         self.populate()
 
+    def _current_entries(self):
+        """Entries for the current search text, 'Saved only' filter and sort order."""
+        return self.main_win.db.list_entries(
+            favorites_only="Saved" in self.filter_drop.currentText(),
+            query=self.search_box.text(),
+            sort=SORT_OPTIONS[self.sort_drop.currentText()],
+        )
+
     def populate(self) -> None:
+        self._search_timer.stop()  # a pending keystroke refresh would only repeat this one
         self.hist_list.clear()
-        fav_only = "Saved" in self.filter_drop.currentText()
-        for item in self.main_win.db.list_entries(favorites_only=fav_only):
+        for item in self._current_entries():
             disp = item["display_term"]
             # Dynamically calculate row height so multi-line sentences never get cut off!
             lines = max(1, (len(disp) // 34) + 1)
@@ -127,7 +162,7 @@ class HistoryPage(QWidget):
             lw = QListWidgetItem()
             lw.setData(Qt.ItemDataRole.UserRole, item["query_key"])
             lw.setSizeHint(QSize(0, row_h))
-            row_w = HistoryItemRowWidget(item["query_key"], disp, item["is_favorite"])
+            row_w = HistoryItemRowWidget(item["query_key"], disp, item["is_favorite"], item["lookup_count"])
             row_w.star_toggled.connect(self._on_row_star_toggled)
             row_w.term_clicked.connect(self._on_row_term_clicked)
             self.hist_list.addItem(lw)
@@ -163,9 +198,8 @@ class HistoryPage(QWidget):
                 self.populate()
 
     def _export_anki(self) -> None:
-        fav_only = "Saved" in self.filter_drop.currentText()
         db = self.main_win.db
-        payloads = [p for p in (db.get_entry(e["query_key"]) for e in db.list_entries(favorites_only=fav_only)) if p]
+        payloads = [p for p in (db.get_entry(e["query_key"]) for e in self._current_entries()) if p]
         if not payloads:
             QMessageBox.information(self, "Ocean Notice", "Nothing to export yet.")
             return

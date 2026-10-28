@@ -23,15 +23,42 @@ PERSIAN -> ENGLISH
   candidate to open its full English entry. Offline, the bundled NLLB model
   translates (lower quality).
 
+READ EXAMPLES ALOUD
+  The speaker button next to an example sentence reads it aloud and highlights
+  each word as it is spoken. With the Kokoro neural voice the highlight follows
+  an estimate of each word's timing (the voice gives no word timestamps), so it
+  can be slightly off on long or unusual words. The fallback voices (Windows
+  SAPI, or spd-say / espeak on Linux) play the sentence without highlighting.
+  Playing another clip clears the highlight.
+
 REVIEW (SPACED REPETITION)
   Words you save with the star button become flashcards. Open Review from the
   home screen or the menu: Space shows the answer, keys 1-4 grade it
   (Again / Hard / Good / Easy). Esc ends the session. Words come back for review
   at growing intervals (SM-2 scheduling); un-starring a word pauses it.
 
+QUIZ
+  Open Quiz from the home screen or the menu to test yourself on your saved
+  words: ten four-choice questions, English -> Persian and Persian -> English,
+  with wrong options drawn from your other saved words. Keys 1-4 answer, Space
+  moves on, and the session ends with a score (Esc ends early). You need at
+  least four saved words with different meanings. Quiz answers do not change
+  your Review schedule: picking from four options is a much weaker signal than
+  recalling a word and grading yourself, so only Review schedules cards.
+
+HISTORY SEARCH AND SORTING
+  Menu > History has a search box that filters as you type, in English or
+  Persian (it matches the word and its Persian meaning; Arabic and Persian
+  letter variants such as ي/ی and ك/ک count as the same). Sort by Most Recent
+  or Most Looked Up; the search and the sort both combine with "Saved
+  Favorites Only". Each lookup you make (typing a word, picking a suggestion,
+  clicking a history row or candidate, the Ctrl+Alt+O hotkey) adds one to that
+  word's counter, shown as x2, x3... beside it; existing history starts at 1.
+  Refresh, Deep search, back/forward and re-showing a result do not count.
+
 EXPORT TO ANKI
   Menu > History > Export to Anki writes the listed entries (all searches, or
-  saved words only, following the filter) to a text file. In Anki (2.1.55+)
+  saved words only, narrowed by any search text) to a text file. In Anki (2.1.55+)
   choose File > Import and pick it: notes land in the "Ocean" deck with
   Persian, IPA, definitions and examples. Importing again updates them.
 
@@ -46,6 +73,15 @@ LOOK UP FROM ANY APP (Ctrl+Alt+O)
              If middle-click paste is off in GNOME, copy (Ctrl+C) first.
     Other Linux desktops: bind any key to  <ocean folder>/run.sh --lookup
   You can also run:  run.sh --lookup <text>
+
+REFRESHING SAVED ENTRIES
+  Saved lookups are fetched again when they are older than the period set in
+  Menu > Settings > Refresh Saved Entries (Never / 1 week / 1 month / 3 months /
+  6 months; default 3 months), or when they were produced by an older version of
+  Ocean's lookup engine, so fixes and improvements reach old entries. "Never"
+  turns refreshing off. Your star, review progress and Persian edits are kept.
+  If the refetch fails (e.g. you are offline) or finds nothing, the saved copy is
+  shown and refreshed on a later lookup.
 
 YOUR DATA
   History, favourites, your translation fixes, settings and the log file (ocean.log)

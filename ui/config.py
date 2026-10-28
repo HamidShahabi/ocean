@@ -7,6 +7,7 @@ import sys
 from typing import Any, Dict
 
 import lexical_engine
+from storage import DEFAULT_REFRESH_PERIOD
 
 log = logging.getLogger("ocean.app")
 
@@ -51,6 +52,7 @@ class SettingsManager:
         "speech_rate": 0,
         "voice_id": "am_michael (Male - US)",
         "theme": "Dark Mode",
+        "refresh_period": DEFAULT_REFRESH_PERIOD,
         # Names (DictionarySource.name) of the dictionary sources switched off in Settings. Storing the
         # off ones keeps every source, including any added later, on by default.
         "disabled_sources": [],

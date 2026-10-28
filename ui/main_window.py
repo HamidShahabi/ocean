@@ -1,5 +1,5 @@
 """The main window: top bar, home page and navigation. It wires the pages together; the pages
-themselves live in results_page.py, review_page.py and drawer.py (history, settings, Teach Ocean)."""
+themselves live in results_page.py, review_page.py, quiz_page.py and drawer.py (history, settings, Teach Ocean)."""
 import logging
 import os
 import re
@@ -25,11 +25,13 @@ from PyQt6.QtWidgets import (
 )
 
 import desktop_lookup
+import lexical_engine
 import storage
 from ui import theme
 from ui.config import DB_FILE, SettingsManager
 from ui.drawer import AttachedRightDrawer
 from ui.results_page import ResultsPage
+from ui.quiz_page import QuizPage
 from ui.review_page import ReviewPage
 from ui.speaker import NeuralSpeaker
 from ui.theme import THEME_COLORS, VectorIcons
@@ -55,6 +57,7 @@ class MainWindow(QMainWindow):
         self.worker: Optional[EngineWorker] = None
         self.sug_worker: Optional[SuggestionWorker] = None
 
+        self._stale_copy: Optional[Dict[str, Any]] = None  # saved copy being refreshed, shown if the refetch fails
         self.nav_history: List[str] = []
         self.nav_index: int = -1
         self._navigating_history: bool = False
@@ -280,7 +283,22 @@ class MainWindow(QMainWindow):
         self.home_review_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.home_review_btn.setToolTip("Review your saved words (spaced repetition)")
         self.home_review_btn.clicked.connect(self.open_review)
-        self.home_vbox.addWidget(self.home_review_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.home_quiz_btn = QPushButton("Quiz")
+        self.home_quiz_btn.setObjectName("GlassPillButton")
+        self.home_quiz_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.home_quiz_btn.setFixedHeight(36)
+        self.home_quiz_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.home_quiz_btn.setToolTip("Quiz yourself on your saved words")
+        self.home_quiz_btn.clicked.connect(self.open_quiz)
+
+        home_actions = QHBoxLayout()
+        home_actions.setSpacing(12)
+        home_actions.addStretch(1)
+        home_actions.addWidget(self.home_review_btn)
+        home_actions.addWidget(self.home_quiz_btn)
+        home_actions.addStretch(1)
+        self.home_vbox.addLayout(home_actions)
         self.home_vbox.addStretch(1)
 
         self.stack.addWidget(self.home_page)
@@ -292,6 +310,10 @@ class MainWindow(QMainWindow):
         # VIEW 2: Spaced-repetition review
         self.review_page = ReviewPage(self)
         self.stack.addWidget(self.review_page)
+
+        # VIEW 3: Quiz on saved words
+        self.quiz_page = QuizPage(self)
+        self.stack.addWidget(self.quiz_page)
 
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)
@@ -387,6 +409,14 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(2)
         self.review_page.setFocus()
 
+    def open_quiz(self) -> None:
+        self.sug_popup.hide()
+        self.right_drawer.hide()
+        self.status_label.setText("")
+        self.quiz_page.start()
+        self.stack.setCurrentIndex(3)
+        self.quiz_page.setFocus()
+
     def refresh_review_badges(self) -> None:
         try:
             due = self.review_page.store.due_count(datetime.now())
@@ -444,8 +474,16 @@ class MainWindow(QMainWindow):
 
         self._switch_to_results_view()
 
+        if not force_refresh and not deep_mode and not self._navigating_history:
+            # A user-initiated lookup (cached or fresh) counts once; refreshes and back/forward do not.
+            self.db.record_lookup(term)
+        self._stale_copy = None
         if not force_refresh and not deep_mode:
             cached = self.db.get_entry(term)
+            if cached and (cached.get("senses") or cached.get("is_sentence")):
+                if self._should_refresh(cached):
+                    self._stale_copy = cached  # shown instead if the refetch fails or comes back empty
+                    cached = None
             if cached and (cached.get("senses") or cached.get("is_sentence")):
                 self.worker = None  # any lookup still running is now stale
                 self.explore_btn.setEnabled(True)
@@ -456,18 +494,44 @@ class MainWindow(QMainWindow):
                 return
 
         self.explore_btn.setEnabled(False)
-        self.status_label.setText(f"Deep searching '{term}'..." if deep_mode else f"Analyzing '{term}'...")
+        if deep_mode:
+            self.status_label.setText(f"Deep searching '{term}'...")
+        elif self._stale_copy is not None:
+            self.status_label.setText(f"Refreshing '{term}'...")
+        else:
+            self.status_label.setText(f"Analyzing '{term}'...")
 
         self.worker = EngineWorker(term, deep_mode=deep_mode)
         self.worker.finished_success.connect(self._on_inference_success)
         self.worker.finished_error.connect(self._on_inference_error)
         start_worker(self.worker)
 
+    def _should_refresh(self, cached: Dict[str, Any]) -> bool:
+        """A saved entry older than the Settings refresh period (or from an older engine) is fetched again,
+        unless offline-only mode is on."""
+        if self.settings.data.get("offline_only"):
+            return False
+        days = storage.refresh_period_days(self.settings.data.get("refresh_period"))
+        return self.db.is_entry_stale(cached, days)
+
+    def _show_stale_copy(self, stale: Dict[str, Any], note: str) -> None:
+        """The refetch failed or yielded nothing useful: keep showing (and keep) the saved copy."""
+        term = self.input_box.text().strip()
+        self.current_term = term
+        self.current_data = stale
+        self.results_page.render(term, stale)
+        self.status_label.setText(note)
+
     def _on_inference_success(self, term: str, data: Dict[str, Any]) -> None:
         if self.sender() is not self.worker:
             return  # a newer search or history navigation superseded this lookup
         self.worker = None
         self.explore_btn.setEnabled(True)
+        stale, self._stale_copy = self._stale_copy, None
+        if stale is not None and not storage.refresh_replaces(stale, data):
+            self._show_stale_copy(stale, "Couldn't refresh - showing your saved copy")
+            return
+        lexical_engine.apply_user_overrides(data)  # a refresh must not undo your manual Persian edits
         self.input_box.setText(data.get("headword", term))
         self.db.save_entry(term, data)
         saved = self.db.get_entry(term) or data
@@ -482,6 +546,10 @@ class MainWindow(QMainWindow):
             return
         self.worker = None
         self.explore_btn.setEnabled(True)
+        stale, self._stale_copy = self._stale_copy, None
+        if stale is not None:
+            self._show_stale_copy(stale, "Couldn't refresh - showing your saved copy")
+            return
         self.status_label.setText("")
         QMessageBox.warning(self, "Ocean Notice", error_msg)
 
