@@ -95,6 +95,14 @@ class EngineLevelTest(unittest.TestCase):
         with mock.patch.object(le, "LEMMATIZER", None):
             self.assertEqual(le.lookup_cefr_level("walks"), "")     # no lemmatizer: only exact words
 
+    def test_missing_wordnet_data_does_not_break_the_level(self):
+        class NoData:
+            def lemmatize(self, word, pos="n"):
+                raise LookupError("wordnet not found")
+        with mock.patch.object(le, "LEMMATIZER", NoData()), self.assertLogs("ocean", level="WARNING"):
+            self.assertEqual(le.lookup_cefr_level("bright"), "A1")
+            self.assertEqual(le.lookup_cefr_level("walks"), "")
+
     def test_bundled_file_sits_where_the_engine_looks(self):
         self.assertEqual(os.path.abspath(le.CEFR_LEVELS_FILE), BUNDLED)
 

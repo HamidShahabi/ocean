@@ -1423,7 +1423,10 @@ def lookup_cefr_level(term: str) -> str:
     not listed itself ('running', 'mice') takes its WordNet lemma's level."""
     lemmas: List[str] = []
     if LEMMATIZER and term.isalpha():
-        lemmas = [LEMMATIZER.lemmatize(term.lower(), pos=p) for p in ("n", "v", "a", "r")]
+        try:
+            lemmas = [LEMMATIZER.lemmatize(term.lower(), pos=p) for p in ("n", "v", "a", "r")]
+        except LookupError:  # the WordNet data is not installed: the exact word is all we can try
+            _log_failure(f"WordNet lemmatizer unavailable for the level of {term!r}")
     return word_levels.cefr_level(CEFR_LEVELS_FILE, term, lemmas) or ""
 
 
