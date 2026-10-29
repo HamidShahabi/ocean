@@ -42,6 +42,7 @@ class KaikkiMappingTest(unittest.TestCase):
 
     def test_a_quotation_that_is_only_its_citation_is_no_example(self):
         self.assertEqual(build.pick_example([{"type": "quotation", "text": "2007, Erin McKean, speech at TED Serendipity"}]), "")
+        self.assertEqual(build.pick_example([{"type": "example", "text": "2007, Erin McKean, speech at TED Serendipity"}]), "")
         self.assertEqual(build.pick_example([{"type": "quotation", "text": "It was pure serendipity that we met."}]),
                          "It was pure serendipity that we met.")
 

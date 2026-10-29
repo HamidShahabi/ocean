@@ -93,17 +93,21 @@ def pick_ipa(sounds: List[Dict[str, Any]]) -> str:
     return phonemic[0]["ipa"] if phonemic else ""
 
 
+def _is_citation(text: str) -> bool:
+    """Text that is really a source reference ("2007, Erin McKean, speech at TED ..."), whatever its type."""
+    return bool(re.match(r"\d{4}\b", text))
+
+
 def pick_example(examples: List[Dict[str, Any]]) -> str:
-    """A usage example (not a collocation list), else a short quotation."""
+    """A usage example (not a collocation list), else a short quotation; never a citation."""
     usage = [e for e in examples if e.get("type") != "quotation" and "collocation" not in e.get("tags", [])]
     for e in usage:
         t = _clean(e.get("text", ""))
-        if 3 <= len(t.split()) and len(t) <= 200:
+        if 3 <= len(t.split()) and len(t) <= 200 and not _is_citation(t):
             return t
     for e in examples:
         t = _clean(e.get("text", ""))
-        # A short quotation, unless its text is really the citation ("2007, Erin McKean, speech at TED").
-        if e.get("type") == "quotation" and 4 <= len(t.split()) and len(t) <= 160 and not re.match(r"\d{4}\b", t):
+        if e.get("type") == "quotation" and 4 <= len(t.split()) and len(t) <= 160 and not _is_citation(t):
             return t
     return ""
 
