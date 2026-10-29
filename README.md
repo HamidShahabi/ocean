@@ -92,7 +92,7 @@ Open **Reader** from the home screen or the menu, paste or type an English text 
 
 ### Where a result comes from
 
-Every source is on your computer (see [Dictionary data](#dictionary-data)):
+Every source is on your computer (see [Dictionary data](#dictionary-data)), so a word's entry appears at once. Persian that is still being translated shows as "…" for a few seconds, then fills in.
 
 - **Definitions** come from Wiktionary, by part of speech, with usage examples, collocations, derived terms and IPA. An inflected form ("ran", "banks") shows its base word's entry. Words Wiktionary lacks fall back to WordNet.
 - **Synonyms and antonyms** come from WordNet 3.1, grouped under the sense they belong to, so the money "bank" and the river "bank" get separate groups.
