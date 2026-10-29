@@ -2,7 +2,7 @@
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QFrame,
@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 class ResultsPage(QWidget):
     """Renders a lookup payload (word, idiom, sentence or Persian input) as a stack of cards."""
+
+    favorite_toggled = pyqtSignal(str, bool)  # (term, now saved): the Reader re-marks its text on this
 
     def __init__(self, main_win: "MainWindow") -> None:
         super().__init__()
@@ -361,6 +363,7 @@ class ResultsPage(QWidget):
             fav_btn.setText("\u2605 Saved" if new_state else "\u2606 Save")
             self.main_win.refresh_review_badges()
             self.main_win.right_drawer.refresh_history()
+            self.favorite_toggled.emit(query_term, new_state)
 
         fav_btn.clicked.connect(_toggle_fav)
         header1.addWidget(fav_btn)

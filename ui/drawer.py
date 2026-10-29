@@ -72,6 +72,14 @@ class AttachedRightDrawer(SmoothGlassFrame):
         btn_quiz.clicked.connect(lambda: self.main_win.open_quiz())
         m_lay.addWidget(btn_quiz)
 
+        btn_reader = QPushButton("Reader")
+        btn_reader.setObjectName("DrawerMenuItem")
+        btn_reader.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_reader.setFixedHeight(46)
+        btn_reader.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_reader.clicked.connect(lambda: self.main_win.open_reader())
+        m_lay.addWidget(btn_reader)
+
         btn_hist = QPushButton("History")
         btn_hist.setObjectName("DrawerMenuItem")
         btn_hist.setFocusPolicy(Qt.FocusPolicy.NoFocus)

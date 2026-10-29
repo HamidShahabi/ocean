@@ -27,6 +27,7 @@ def get_base_dir() -> str:
 BASE_DIR = get_base_dir()
 DB_FILE = lexical_engine.user_data_path("lexicon_vault.db")
 SETTINGS_FILE = lexical_engine.user_data_path("ocean_settings.json")
+READER_FILE = lexical_engine.user_data_path("reader_text.json")  # the Reader's last text and position
 
 VOICE_OPTIONS = [
     "am_michael (Male - US)",
@@ -44,6 +45,9 @@ SPEED_OPTIONS = [
 ]
 
 
+READER_LEVEL_OPTIONS = ["A1", "A2", "B1", "B2", "C1", "C2", "Off"]
+
+
 class SettingsManager:
     DEFAULTS = {
         "font_scale": "Medium (14px)",
@@ -57,6 +61,8 @@ class SettingsManager:
         # off ones keeps every source, including any added later, on by default.
         "disabled_sources": [],
         "offline_only": False,
+        # Reader page: words of this CEFR level or higher are marked ("Off" = no level marking).
+        "reader_min_level": "B2",
     }
 
     def __init__(self, path: str = SETTINGS_FILE) -> None:
@@ -75,6 +81,8 @@ class SettingsManager:
                     self.data["voice_id"] = VOICE_OPTIONS[0]
                 off = self.data.get("disabled_sources")
                 self.data["disabled_sources"] = [n for n in off if isinstance(n, str)] if isinstance(off, list) else []
+                if self.data.get("reader_min_level") not in READER_LEVEL_OPTIONS:
+                    self.data["reader_min_level"] = self.DEFAULTS["reader_min_level"]
             except Exception:
                 log.exception("Could not read settings %s; using defaults", self.path)
 

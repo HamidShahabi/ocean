@@ -1,5 +1,5 @@
 """The main window: top bar, home page and navigation. It wires the pages together; the pages
-themselves live in results_page.py, review_page.py, quiz_page.py and drawer.py (history, settings, Teach Ocean)."""
+themselves live in results_page.py, review_page.py, quiz_page.py, reader_page.py and drawer.py (history, settings, Teach Ocean)."""
 import logging
 import os
 import re
@@ -32,6 +32,7 @@ from ui.config import DB_FILE, SettingsManager
 from ui.drawer import AttachedRightDrawer
 from ui.results_page import ResultsPage
 from ui.quiz_page import QuizPage
+from ui.reader_page import ReaderPage
 from ui.review_page import ReviewPage
 from ui.speaker import NeuralSpeaker
 from ui.theme import THEME_COLORS, VectorIcons
@@ -293,11 +294,20 @@ class MainWindow(QMainWindow):
         self.home_quiz_btn.setToolTip("Quiz yourself on your saved words")
         self.home_quiz_btn.clicked.connect(self.open_quiz)
 
+        self.home_reader_btn = QPushButton("Reader")
+        self.home_reader_btn.setObjectName("GlassPillButton")
+        self.home_reader_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.home_reader_btn.setFixedHeight(36)
+        self.home_reader_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.home_reader_btn.setToolTip("Paste a text and read it, looking up words as you go")
+        self.home_reader_btn.clicked.connect(self.open_reader)
+
         home_actions = QHBoxLayout()
         home_actions.setSpacing(12)
         home_actions.addStretch(1)
         home_actions.addWidget(self.home_review_btn)
         home_actions.addWidget(self.home_quiz_btn)
+        home_actions.addWidget(self.home_reader_btn)
         home_actions.addStretch(1)
         self.home_vbox.addLayout(home_actions)
         self.home_vbox.addStretch(1)
@@ -315,6 +325,10 @@ class MainWindow(QMainWindow):
         # VIEW 3: Quiz on saved words
         self.quiz_page = QuizPage(self)
         self.stack.addWidget(self.quiz_page)
+
+        # VIEW 4: Reader (paste a text, click words to look them up)
+        self.reader_page = ReaderPage(self)
+        self.stack.addWidget(self.reader_page)
 
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)
@@ -417,6 +431,13 @@ class MainWindow(QMainWindow):
         self.quiz_page.start()
         self.stack.setCurrentIndex(3)
         self.quiz_page.setFocus()
+
+    def open_reader(self) -> None:
+        self.sug_popup.hide()
+        self.right_drawer.hide()
+        self.status_label.setText("")
+        self.reader_page.start()
+        self.stack.setCurrentIndex(4)
 
     def refresh_review_badges(self) -> None:
         try:
@@ -573,5 +594,6 @@ class MainWindow(QMainWindow):
 
         self.setStyleSheet(qss)
         self.sug_popup.setStyleSheet(qss)
+        self.reader_page.apply_theme()  # its marks are colours, not part of the style sheet
         self.right_drawer.update()
         self.update()
