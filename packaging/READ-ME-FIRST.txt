@@ -16,6 +16,7 @@ USE
   - Look up from any app: copy a word (Ctrl+C), then press Ctrl+Alt+O while
     Ocean is running.
   - Menu > History > Export to Anki makes a file you can import into Anki.
+  - Menu > Pronounce reads any English text aloud with its IPA.
 
 Works offline: the dictionary is on your computer. Without internet, Persian
 the dictionary doesn't have comes from an offline translator (lower quality).

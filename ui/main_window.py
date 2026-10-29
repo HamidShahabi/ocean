@@ -1,5 +1,5 @@
 """The main window: top bar, home page and navigation. It wires the pages together; the pages
-themselves live in results_page.py, review_page.py, quiz_page.py, reader_page.py and drawer.py (history, settings, Teach Ocean)."""
+themselves live in results_page.py, review_page.py, quiz_page.py, reader_page.py, pronounce_page.py and drawer.py (history, settings, Teach Ocean)."""
 import logging
 import os
 import re
@@ -31,6 +31,7 @@ from ui.config import DB_FILE, SettingsManager
 from ui.drawer import AttachedRightDrawer
 from ui.results_page import ResultsPage
 from ui.quiz_page import QuizPage
+from ui.pronounce_page import PronouncePage
 from ui.reader_page import ReaderPage
 from ui.review_page import ReviewPage
 from ui.speaker import NeuralSpeaker
@@ -326,6 +327,10 @@ class MainWindow(QMainWindow):
         self.reader_page = ReaderPage(self)
         self.stack.addWidget(self.reader_page)
 
+        # VIEW 5: Pronounce (read a text aloud with its IPA, no translation)
+        self.pronounce_page = PronouncePage(self)
+        self.stack.addWidget(self.pronounce_page)
+
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)
         self.debounce_timer.setInterval(150)
@@ -434,6 +439,13 @@ class MainWindow(QMainWindow):
         self.status_label.setText("")
         self.reader_page.start()
         self.stack.setCurrentIndex(4)
+
+    def open_pronounce(self) -> None:
+        self.sug_popup.hide()
+        self.right_drawer.hide()
+        self.status_label.setText("")
+        self.stack.setCurrentIndex(5)
+        self.pronounce_page.start()
 
     def refresh_review_badges(self) -> None:
         try:

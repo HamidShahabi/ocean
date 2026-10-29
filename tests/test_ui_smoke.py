@@ -14,6 +14,7 @@ os.environ["XDG_DATA_HOME"] = _DATA
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PyQt6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, pyqtSignal  # noqa: E402
 from PyQt6.QtGui import QTextCursor  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
@@ -27,6 +28,8 @@ from ui import theme  # noqa: E402
 from ui.config import DB_FILE, READER_FILE, SettingsManager  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_SETTINGS, PAGE_TEACH  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
+from ui import pronounce_page  # noqa: E402
+from lexicon_fixture import use_lexicon  # noqa: E402
 
 WORD = {
     "headword": "serendipity",
@@ -350,6 +353,32 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIn("<b>Derived terms:</b>", texts)
         links = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
         self.assertIn("serendipitously", links)
+
+    def test_pronounce_page_reads_aloud_with_ipa_and_never_translates(self):
+        use_lexicon(self)
+        self.win.right_drawer.show_page(PAGE_MENU)
+        menu_btn = next(b for b in self.win.right_drawer.findChildren(QPushButton) if b.text() == "Pronounce")
+        no_lookup = AssertionError("the Pronounce page must not look up or translate")
+        with mock.patch.object(lexical_engine, "analyze_with_dictionaries", side_effect=no_lookup), \
+             mock.patch.object(lexical_engine, "translate_with_source", side_effect=no_lookup), \
+             mock.patch.object(lexical_engine, "translate_batch_fast", side_effect=no_lookup), \
+             mock.patch.object(self.win.speaker, "has_voice", return_value=True), \
+             mock.patch.object(self.win.speaker, "speak", return_value=7) as speak:
+            menu_btn.click()
+            page = self.win.pronounce_page
+            self.assertIs(self.win.stack.currentWidget(), page)
+            page.input.setPlainText("  bank  ")
+            page.pronounce()
+            page.worker.wait(5000)
+            for _ in range(20):
+                self.app.processEvents()
+                if page.ipa_label.text():
+                    break
+                time.sleep(0.05)
+        speak.assert_called_once_with("bank")
+        self.assertEqual(page.text_label.text(), "bank")
+        self.assertEqual(page.ipa_label.text(), "US  /bæŋk/")  # the dictionary's transcription for a word
+        self.assertEqual(pronounce_page.ipa_for("bank of the river").count("/"), 2)  # word by word for a phrase
 
     def test_a_clear_message_shows_only_when_every_source_is_off(self):
         registry = dictionary_sources.REGISTRY

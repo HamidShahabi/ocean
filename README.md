@@ -8,6 +8,7 @@ An English → Persian learner's dictionary.
 - [Looking things up](#looking-things-up)
 - [Learning](#learning)
 - [History and export](#history-and-export)
+- [Pronounce](#pronounce)
 - [Settings](#settings)
 - [Dictionary data](#dictionary-data)
 - [Your data](#your-data)
@@ -159,6 +160,10 @@ Each lookup you make (typing a word, picking a suggestion, clicking a history ro
 ### Export to Anki
 
 **Menu › History › Export to Anki** writes the listed entries (all searches, or saved words only, narrowed by any search text) to a text file. In Anki 2.1.55 or later choose **File › Import** and pick it: notes land in the "Ocean" deck with Persian, IPA, definitions and examples. Importing again updates them.
+
+## Pronounce
+
+**Menu › Pronounce** reads any English word, phrase or text aloud with the voice chosen in Settings and shows its US IPA underneath. Nothing is translated or explained there. Type or paste the text and press **Pronounce** (Ctrl+Enter); **Stop** or leaving the page silences it. With the Kokoro voice each word is highlighted as it is spoken. A single word shows its Wiktionary transcription; a longer text is transcribed word by word. Up to 5,000 characters (about 800 words) are read in one go.
 
 ## Settings
 
