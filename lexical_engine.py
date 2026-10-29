@@ -56,6 +56,25 @@ if not log.handlers:
     log.setLevel(logging.INFO)
 
 
+def log_uncaught_exceptions() -> None:
+    """Send crashes that nothing caught (a Qt slot, a background thread) to ocean.log. With a custom
+    sys.excepthook, PyQt also stops aborting the whole app over an exception raised in a slot."""
+    def on_main(exc_type, exc, tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        log.critical("Uncaught exception", exc_info=(exc_type, exc, tb))
+
+    def on_thread(args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is SystemExit:
+            return
+        name = args.thread.name if args.thread else "?"
+        log.critical("Uncaught exception in thread %s", name, exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = on_main
+    threading.excepthook = on_thread
+
+
 def user_data_path(filename: str) -> str:
     """Path of a user-written file in USER_DATA_DIR. On first use, copies (never moves) the newest
     copy left next to the app by older versions, which kept user data in the install folder."""

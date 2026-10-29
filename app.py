@@ -16,6 +16,7 @@ from ui.workers import exit_app
 
 
 def main() -> None:
+    lexical_engine.log_uncaught_exceptions()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
