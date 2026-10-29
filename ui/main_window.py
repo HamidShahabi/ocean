@@ -7,9 +7,8 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from bs4 import BeautifulSoup
 from PyQt6.QtCore import Qt, QEvent, QObject, QPoint, QSize, QTimer
-from PyQt6.QtGui import QCursor, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import QCursor, QIcon, QKeySequence, QShortcut, QTextDocumentFragment
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -127,7 +126,7 @@ class MainWindow(QMainWindow):
                 if isinstance(widget, QLineEdit):
                     widget.selectAll()
                 elif isinstance(widget, QLabel):
-                    plain = BeautifulSoup(widget.text(), "lxml").get_text(" ", strip=True)
+                    plain = " ".join(QTextDocumentFragment.fromHtml(widget.text()).toPlainText().split())
                     QApplication.clipboard().setText(plain)
             elif act == "Clear" and isinstance(widget, QLineEdit):
                 widget.clear()
@@ -508,6 +507,7 @@ class MainWindow(QMainWindow):
                 self.explore_btn.setEnabled(True)
                 self.current_term = term
                 self.current_data = cached
+                cached["_from_history"] = True  # the offline-only notice says so
                 self.results_page.render(term, cached)
                 self.status_label.setText("")
                 return

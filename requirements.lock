@@ -6,8 +6,6 @@ altgraph==0.17.5
     #   pyinstaller
 attrs==26.1.0
     # via phonemizer
-beautifulsoup4==4.15.0
-    # via -r requirements.txt
 certifi==2026.10.23
     # via requests
 cffi==2.1.1
@@ -39,8 +37,6 @@ joblib==1.6.0
     #   nltk
     #   phonemizer
 kokoro-onnx==0.6.1
-    # via -r requirements.txt
-lxml==6.1.3
     # via -r requirements.txt
 macholib==1.16.4 ; sys_platform == 'darwin'
     # via pyinstaller
@@ -94,13 +90,10 @@ setuptools==84.2.1
     # via pyinstaller
 soundfile==0.14.0
     # via -r requirements.txt
-soupsieve==3.0.4
-    # via beautifulsoup4
 tqdm==4.70.1
     # via nltk
 typing-extensions==4.16.0
     # via
-    #   beautifulsoup4
     #   phonemizer
     #   soundfile
 urllib3==2.8.0

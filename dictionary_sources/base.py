@@ -2,7 +2,7 @@
 that runs the enabled ones and merges what they return."""
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import lexical_engine as le
 
@@ -13,16 +13,10 @@ class LookupContext:
     term: str
     is_idiom: bool = False        # multi-word phrase
     root_lemma: str = ""
-    offline: bool = False         # when set, sources that need the network are skipped
-    requester: Optional[Callable[..., Any]] = None  # replaces smart_request (tests); the per-lookup cache lives in smart_request
 
     def __post_init__(self) -> None:
         if not self.root_lemma:
             self.root_lemma = self.term
-
-    def request(self, method: str, url: str, **kwargs):
-        """The one place a source touches the network: wrap or replace it to cache or record requests."""
-        return (self.requester or le.smart_request)(method, url, **kwargs)
 
 
 @dataclass
@@ -31,21 +25,19 @@ class PartialEntry:
     ipa_us: str = ""
     primary_pos: str = ""
     senses: List[Dict[str, str]] = field(default_factory=list)            # {"pos", "def", "example_en"}
-    syns: List[str] = field(default_factory=list)
-    ants: List[str] = field(default_factory=list)
+    syns: List[Dict[str, str]] = field(default_factory=list)              # {"term", "sense"}: grouped by sense
+    ants: List[Dict[str, str]] = field(default_factory=list)              # {"term", "sense"}
     collocations: List[Dict[str, str]] = field(default_factory=list)      # {"term", "example_en"}
-    collocation_terms: List[str] = field(default_factory=list)            # bare phrases, example made up later
+    derived: List[str] = field(default_factory=list)                      # derived terms and compounds
     examples: List[Dict[str, str]] = field(default_factory=list)          # {"en", "fa"} sentence pairs
     frequency: Optional[float] = None                                     # occurrences per million words
 
 
 class DictionarySource:
-    """Subclass, set the three class attributes and implement fetch(). Never raises out of lookup()."""
+    """Subclass, set name and label and implement fetch(). Never raises out of lookup()."""
     name = ""                 # short stable id: settings and log lines refer to it
     label = ""                # human-readable name
-    needs_network = True      # False for sources that only read bundled data
     needs: Tuple[str, ...] = ()  # sources (registered earlier) whose result fetch() wants as `prior`
-    part_of = ""              # another source's name: switched on and off with it, not listed on its own
 
     def applies(self, ctx: LookupContext) -> bool:
         """False when this kind of lookup (a phrase, a single word...) is none of this source's business."""
@@ -77,7 +69,7 @@ def merge_entries(entries: Iterable[PartialEntry]) -> PartialEntry:
         merged.syns += e.syns
         merged.ants += e.ants
         merged.collocations += e.collocations
-        merged.collocation_terms += e.collocation_terms
+        merged.derived += e.derived
         merged.examples += e.examples
     return merged
 
@@ -119,21 +111,14 @@ class SourceRegistry:
         return name not in self._disabled
 
     def any_enabled(self) -> bool:
-        """False when the user has switched every source off (says nothing about offline-only mode)."""
-        return any(s.name not in self._disabled for s in self._sources if not s.part_of)
+        """False when the user has switched every source off."""
+        return any(s.name not in self._disabled for s in self._sources)
 
     def disabled_names(self) -> List[str]:
         return sorted(self._disabled)
 
-    def usable(self, name: str, ctx: LookupContext) -> Optional[DictionarySource]:
-        """The named source if it may be contacted for this lookup (enabled, online if it needs to be)."""
-        source = self.get(name)
-        if name in self._disabled or source.part_of in self._disabled or (ctx.offline and source.needs_network):
-            return None
-        return source
-
     def active(self, ctx: LookupContext) -> List[DictionarySource]:
-        return [s for s in self._sources if self.usable(s.name, ctx) and s.applies(ctx)]
+        return [s for s in self._sources if s.name not in self._disabled and s.applies(ctx)]
 
     def run(self, ctx: LookupContext) -> PartialEntry:
         """Look the term up in every active source at once (a source with `needs` waits for those) and merge."""

@@ -110,17 +110,14 @@ class SettingsPage(QWidget):
         title = QLabel("Dictionary sources")
         title.setObjectName("CardTitle")
         parent_layout.addWidget(title)
-        hint = QLabel("Turn off a source that is broken, slow or unwanted. It is not contacted or read "
+        hint = QLabel("Every source is stored on this computer. Turn off one you don't want: it is not read "
                       "for any lookup. Click Apply or Save to use the change.")
         hint.setObjectName("MutedText")
         hint.setWordWrap(True)
         parent_layout.addWidget(hint)
         self.source_checks: Dict[str, QCheckBox] = {}
         for source in REGISTRY.all():
-            if source.part_of:
-                continue  # follows its parent's toggle
-            text = source.label if source.needs_network else f"{source.label} (bundled)"
-            box = QCheckBox(text)
+            box = QCheckBox(source.label)
             box.setChecked(REGISTRY.is_enabled(source.name))
             self.source_checks[source.name] = box
             parent_layout.addWidget(box)

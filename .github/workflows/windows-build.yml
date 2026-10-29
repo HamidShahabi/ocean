@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120  # setup downloads ~750 MB of datasets and imports them
     defaults:
       run:
         shell: pwsh
@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up (venv, locked dependencies, NLTK data, voice + translation models, fonts, icon)
+      - name: Set up (venv, locked dependencies, NLTK data, voice + translation models, dictionary database, fonts, icon)
         env:
           QT_QPA_PLATFORM: offscreen   # icon generation creates a QApplication; no desktop needed
         run: |

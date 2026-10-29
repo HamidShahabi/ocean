@@ -13,9 +13,11 @@ _DATA = tempfile.mkdtemp()
 os.environ["XDG_DATA_HOME"] = _DATA
 os.environ["APPDATA"] = _DATA
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import requests  # noqa: E402
 
 import lexical_engine as le  # noqa: E402
+from lexicon_fixture import use_lexicon  # noqa: E402
 
 GTX = "https://translate.googleapis.com/translate_a/single"
 
@@ -221,13 +223,17 @@ class LookupScopeTest(unittest.TestCase):
 
 
 class WholeLookupTest(unittest.TestCase):
-    """analyze_with_dictionaries() under a counting fake network."""
+    """analyze_with_dictionaries() under a counting fake network (Google is the only online layer left)."""
 
     def run_lookup(self, term, network):
+        use_lexicon(self)
         patches = [
             mock.patch.object(le, "_send_request", network),
             mock.patch.object(le, "wn", None),  # WordNet may be missing and is not what is under test
+            mock.patch.object(le, "LEMMATIZER", None),
             mock.patch.object(le, "sentence_to_ipa", return_value=""),
+            mock.patch.object(le, "_ct2_translate", return_value=""),
+            mock.patch.object(le, "_ct2_translate_many", side_effect=lambda texts: [""] * len(texts)),
             mock.patch.dict(le.USER_MEMORY, {"overrides": {}, "entries": {}}),
         ]
         for p in patches:
@@ -236,43 +242,31 @@ class WholeLookupTest(unittest.TestCase):
         return le.analyze_with_dictionaries(term)
 
     def test_word_lookup_asks_the_network_for_each_distinct_request_once(self):
-        # "dull" is both a synonym and an antonym, so two worker threads want the same example lookup.
-        def respond(method, url, **kwargs):
-            time.sleep(0.02)
-            if "datamuse.com/words" in url:
-                params = dict(kwargs["params"])
-                if "rel_syn" in params:
-                    return make_response([{"word": "shiny"}, {"word": "dull"}])
-                if "rel_ant" in params:
-                    return make_response([{"word": "dull"}, {"word": "dim"}])
-                return make_response([])
-            if "dictionaryapi.dev" in url:
-                word = url.rsplit("/", 1)[-1]
-                return make_response([{"meanings": [{"partOfSpeech": "adjective", "definitions": [
-                    {"definition": "Giving out a lot of light.", "example": f"The {word} light filled the whole room."}]}]}])
-            if "translate" in url:
-                return make_response([[["ترجمه", "x"]], [["adj", ["ترجمه"]]]])
-            return make_response(b"<html></html>")
-
-        net = CountingNetwork()
-        net_calls = net.calls
+        # Google has no answer for the headword, so the batch step asks for it again: the cache answers that.
+        net_calls = []
 
         def counted(method, url, **kwargs):
+            time.sleep(0.02)
             net_calls.append((method, url, repr(kwargs.get("params")), repr(kwargs.get("data"))))
-            return respond(method, url, **kwargs)
+            return make_response([[]])
 
-        result = self.run_lookup("bright", counted)
-        self.assertEqual(result["headword"], "bright")
+        result = self.run_lookup("zeitgeist", counted)
+        self.assertEqual(result["headword"], "zeitgeist")
         self.assertTrue(net_calls)
         self.assertEqual(len(net_calls), len(set(net_calls)), "an identical request was sent twice")
-        self.assertEqual(sum("api.dictionaryapi.dev" in c[1] and c[1].endswith("/dull") for c in net_calls), 1)
+
+    def test_a_word_the_dictionary_translates_needs_no_request_for_it(self):
+        net = CountingNetwork(body=[])
+        result = self.run_lookup("book", net)
+        self.assertEqual(result["persian_equivalent"], "کتاب")
+        self.assertEqual([c for c in net.calls if "('q', 'book')" in c[2]], [])
 
     def test_two_lookups_in_a_row_do_not_share_responses(self):
         net = CountingNetwork(body=[])
-        self.run_lookup("bright", net)
+        self.run_lookup("zeitgeist", net)
         first = len(net.calls)
         self.assertGreater(first, 0)
-        le.analyze_with_dictionaries("bright")
+        le.analyze_with_dictionaries("zeitgeist")
         self.assertEqual(len(net.calls), 2 * first)
 
 

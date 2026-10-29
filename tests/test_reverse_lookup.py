@@ -9,11 +9,13 @@ _DATA = tempfile.mkdtemp()
 os.environ["XDG_DATA_HOME"] = _DATA
 os.environ["APPDATA"] = _DATA
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lexicon_fixture import use_lexicon  # noqa: E402
 import lexical_engine as le  # noqa: E402
 from anki_export import note_fields  # noqa: E402
 
 FLEETING = "زودگذر"            # زودگذر
-SPILL = "لو دادن راز"  # لو دادن راز (in the bundled idiom list)
+BANK = "بانک"  # the fixture dictionary translates "bank" so
 
 
 class DetectionAndNormalisationTest(unittest.TestCase):
@@ -31,8 +33,12 @@ class DetectionAndNormalisationTest(unittest.TestCase):
 
 
 class LocalReverseTest(unittest.TestCase):
-    def test_bundled_idiom_and_user_override_match_per_part(self):
-        self.assertIn("spill the beans", le.reverse_lookup_local(SPILL))
+    def setUp(self):
+        use_lexicon(self)
+
+    def test_dictionary_translation_and_user_override_match_per_part(self):
+        self.assertEqual(le.reverse_lookup_local(BANK), ["bank"])
+        self.assertEqual(le.reverse_lookup_local("بانْك"), ["bank"])  # diacritic and Arabic kaf
         with mock.patch.dict(le.USER_MEMORY, {"overrides": {"ephemeral": f"گذرا ، {FLEETING}"}}):
             self.assertEqual(le.reverse_lookup_local(FLEETING)[0], "ephemeral")
         self.assertEqual(le.reverse_lookup_local("   "), [])
@@ -55,6 +61,9 @@ class GtxParsingTest(unittest.TestCase):
 
 
 class AnalyzePersianTest(unittest.TestCase):
+    def setUp(self):
+        use_lexicon(self)
+
     def _run(self, text, gtx=("", []), c5="", offline=""):
         with mock.patch.object(le, "_google_fa_to_en", return_value=gtx), \
              mock.patch.object(le, "_clients5", return_value=c5), \
@@ -62,13 +71,12 @@ class AnalyzePersianTest(unittest.TestCase):
             return le.analyze_persian(text), ct2
 
     def test_word_merges_sources_local_first_without_duplicates(self):
-        d, ct2 = self._run(SPILL, gtx=("Reveal the secret", [{"term": "reveal", "pos": "verb"},
-                                                               {"term": "Spill the beans", "pos": "verb"}]))
+        d, ct2 = self._run(BANK, gtx=("Bank", [{"term": "bank", "pos": "noun"}, {"term": "depository", "pos": "noun"}]))
         self.assertTrue(d["is_reverse"])
         self.assertFalse(d["is_sentence"])
-        self.assertEqual(d["english_translation"], "spill the beans")      # curated idiom beats machine output
-        self.assertEqual(d["machine_translation"], "Reveal the secret")
-        self.assertEqual([c["term"] for c in d["candidates"]], ["spill the beans", "Reveal the secret", "reveal"])
+        self.assertEqual(d["english_translation"], "bank")      # the dictionary's word beats machine output
+        self.assertEqual(d["machine_translation"], "")  # same word, different case: nothing to contrast
+        self.assertEqual([c["term"] for c in d["candidates"]], ["bank", "depository"])
         ct2.assert_not_called()
 
     def test_falls_back_to_clients5_then_offline(self):

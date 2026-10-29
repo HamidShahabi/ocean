@@ -15,7 +15,7 @@ log = logging.getLogger("ocean.app")
 def get_base_dir() -> str:
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(sys.executable)
-        if os.path.exists(os.path.join(exe_dir, "offline_lexicon.json")):
+        if os.path.exists(os.path.join(exe_dir, "cefr_levels.json")):
             return exe_dir
         parent_dir = os.path.abspath(os.path.join(exe_dir, "..", ".."))
         if os.path.exists(os.path.join(parent_dir, "app.py")):

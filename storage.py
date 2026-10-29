@@ -142,7 +142,8 @@ class HistoryStore:
         for edits to an existing entry (fixing a translation) so they don't make it look newer."""
         key = term.strip().lower()
         now = datetime.now().isoformat(timespec="seconds")
-        json_str = json.dumps(payload, ensure_ascii=False)
+        # Keys starting with "_" are added on the way out (get_entry, the UI) and never stored.
+        json_str = json.dumps({k: v for k, v in payload.items() if not k.startswith("_")}, ensure_ascii=False)
         with self._conn() as conn:
             cur = conn.execute("SELECT is_favorite FROM lexicon WHERE query_key = ?", (key,))
             row = cur.fetchone()

@@ -15,6 +15,10 @@ voices-v1.0.bin
 *.part
 nltk_data/
 offline_mt_model/
+offline_slm_model/
+ocean_lexicon.db
+*.building
+dataset_downloads/
 
 # Personal data written at runtime
 lexicon_vault.db*

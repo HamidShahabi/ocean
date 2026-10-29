@@ -297,27 +297,59 @@ class UiSmokeTest(unittest.TestCase):
     def test_settings_lists_every_source_and_applies_the_toggles(self):
         registry = dictionary_sources.REGISTRY
         page = self.win.right_drawer.settings_page
-        self.assertEqual(list(page.source_checks), [s.name for s in registry.all() if not s.part_of])
+        self.assertEqual(list(page.source_checks), registry.names())
         self.assertTrue(all(box.isChecked() for box in page.source_checks.values()))
         for source in registry.all():
-            if not source.part_of:
-                self.assertIn(source.label, page.source_checks[source.name].text())
-        page.source_checks["cambridge"].setChecked(False)
+            self.assertEqual(source.label, page.source_checks[source.name].text())
+        page.source_checks["urban_dictionary"].setChecked(False)
         page.source_checks["wordnet"].setChecked(False)
         with mock.patch.object(self.win.settings, "save") as save:
             page._apply_live()
         self.assertTrue(save.called)
-        self.assertEqual(self.win.settings.data["disabled_sources"], ["cambridge", "wordnet"])
-        self.assertEqual(registry.disabled_names(), ["cambridge", "wordnet"])
-        page.source_checks["cambridge"].setChecked(True)
+        self.assertEqual(self.win.settings.data["disabled_sources"], ["wordnet", "urban_dictionary"])  # menu order
+        self.assertEqual(registry.disabled_names(), ["urban_dictionary", "wordnet"])
+        page.source_checks["urban_dictionary"].setChecked(True)
         with mock.patch.object(self.win.settings, "save"):
             page._apply_live()
         self.assertEqual(registry.disabled_names(), ["wordnet"])
         # Reopening the page drops ticks that were never applied.
-        page.source_checks["longman"].setChecked(False)
+        page.source_checks["corpora"].setChecked(False)
         page.on_show()
-        self.assertTrue(page.source_checks["longman"].isChecked())
+        self.assertTrue(page.source_checks["corpora"].isChecked())
         self.assertFalse(page.source_checks["wordnet"].isChecked())
+
+    def test_offline_badge_says_where_the_result_came_from(self):
+        lexical_engine.set_offline_only(True)
+        cases = [
+            (dict(WORD, _from_history=True), "your history"),
+            (dict(WORD, persian_source=lexical_engine.FA_SOURCE_NLLB), "Persian by the offline translator"),
+            (dict(WORD, persian_source=lexical_engine.FA_SOURCE_WIKTIONARY), "Ocean's internal dictionary"),
+        ]
+        for payload, expected in cases:
+            self.win.results_page.render("serendipity", payload)
+            self.assertIn(expected, offline_badges(self.win)[0].text())
+
+    def test_a_saved_lookup_shown_offline_is_marked_as_history(self):
+        lexical_engine.set_offline_only(True)
+        with mock.patch("ui.main_window.start_worker"):
+            self.win._analyze_input(override_term="serendipity")
+        self.assertIn("your history", offline_badges(self.win)[0].text())
+        self.assertNotIn("_from_history", self.win.db.get_entry("serendipity"))  # never stored
+
+    def test_synonyms_are_grouped_under_their_sense_and_derived_terms_show(self):
+        payload = dict(WORD, derived_terms=["serendipitous", "serendipitously"], synonyms=[
+            {"term": "luck", "fa": "شانس", "sense": "noun: an unknown force"},
+            {"term": "fortune", "fa": "بخت", "sense": "noun: an unknown force"},
+            {"term": "chance", "fa": "اتفاق", "sense": "noun: an unplanned event"},
+        ])
+        self.win.results_page.render("serendipity", payload)
+        texts = card_texts(self.win)
+        self.assertEqual(texts.count("noun: an unknown force"), 1)  # one heading per sense
+        self.assertEqual(texts.count("noun: an unplanned event"), 1)
+        self.assertLess(texts.index("noun: an unknown force"), texts.index("noun: an unplanned event"))
+        self.assertIn("<b>Derived terms:</b>", texts)
+        links = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
+        self.assertIn("serendipitously", links)
 
     def test_a_clear_message_shows_only_when_every_source_is_off(self):
         registry = dictionary_sources.REGISTRY

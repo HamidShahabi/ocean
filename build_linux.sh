@@ -18,21 +18,25 @@ collect=()
 for pkg in kokoro_onnx espeakng_loader phonemizer segments language_tags eng_to_ipa ctranslate2 sentencepiece; do
     collect+=(--collect-all "$pkg")
 done
+# The optional language model runtime, when installed (setup_linux.sh --with-slm); imported lazily, so name it.
+if .venv/bin/python -c "import llama_cpp" 2>/dev/null; then
+    collect+=(--collect-all llama_cpp)
+fi
 
 .venv/bin/pyinstaller --noconfirm --windowed --onedir --paths=. \
-    --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=bs4 --hidden-import=lxml --hidden-import=nltk \
+    --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=nltk \
     "${collect[@]}" --name Ocean app.py
 
 # Data files live next to the executable (ui.config.get_base_dir / lexical_engine._get_engine_base_dir look there).
 # User data (history, memory, settings) lives in ~/.local/share/Ocean, not in the build.
-for f in offline_lexicon.json cefr_levels.json ocean_offline_core.db voices-v1.0.bin; do
+for f in cefr_levels.json ocean_lexicon.db voices-v1.0.bin; do
     [ -f "$f" ] && cp -f "$f" dist/Ocean/
 done
 # One voice model only: int8 (~88 MB) if present, else the full-size one (~310 MB).
 for f in kokoro-v1.0.int8.onnx kokoro-v1.0.onnx; do
     if [ -f "$f" ]; then cp -f "$f" dist/Ocean/; break; fi
 done
-for d in nltk_data offline_mt_model fonts; do
+for d in nltk_data offline_mt_model offline_slm_model fonts; do
     [ -d "$d" ] && cp -rf "$d" dist/Ocean/
 done
 

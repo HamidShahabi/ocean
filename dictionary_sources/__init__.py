@@ -1,39 +1,24 @@
-"""Dictionary sources: one self-contained module per site, one registry the lookup engine merges.
+"""Dictionary sources: one module per dataset, one registry the lookup engine merges.
 
-To fix, replace or switch off a site, touch only its module (or REGISTRY.set_enabled(name, False)).
-To add one, subclass DictionarySource and register it below; position in the list is merge order.
-
-Seams for later work: REGISTRY.set_enabled / disabled_names (Settings), LookupContext.offline with
-DictionarySource.needs_network (offline-only mode), LookupContext.requester / .request (replace the network in
-tests). The per-lookup request cache is not here: it sits in lexical_engine.smart_request, so it covers every source.
+Every source reads the local database (lexicon_db.LexiconDB, built by tools/build_lexicon_db.py) or the local
+WordNet, so lookups need no network. To fix, replace or switch off a source, touch only its module (or
+REGISTRY.set_enabled(name, False)). To add one, subclass DictionarySource and register it below; position in
+the list is merge order.
 """
 from .base import DictionarySource, LookupContext, PartialEntry, SourceRegistry, merge_entries
-from .cambridge import CambridgeSource
-from .datamuse import DatamuseFrequencySource, DatamuseSource
-from .dictionaryapi import DictionaryApiSource
-from .longman import LongmanSource
-from .offline import CuratedSynonymsSource, IdiomFallbackSource, OfflineIdiomsSource
-from .tatoeba import TatoebaSource
-from .thefreedictionary import TheFreeDictionarySource
-from .wiktionary import WiktionarySource
+from .corpora import CorporaSource
+from .kaikki import KaikkiSource
+from .urban_dictionary import UrbanDictionarySource
 from .wordnet import WordNetSource
 
 REGISTRY = SourceRegistry()
-# The order is what the old engine produced: phrase sources first, then Cambridge and Longman, then
-# the dictionaryapi.dev/WordNet group, with Datamuse after the sources whose part of speech it needs.
+# Wiktionary first (its IPA and part of speech win), WordNet after it (synonyms grouped by the senses Wiktionary
+# put first), slang after the standard senses, sentence pairs last.
 for _source in (
-    OfflineIdiomsSource(),
-    TheFreeDictionarySource(),
-    WiktionarySource(),
-    IdiomFallbackSource(),
-    CambridgeSource(),
-    LongmanSource(),
-    CuratedSynonymsSource(),
-    DictionaryApiSource(),
+    KaikkiSource(),
     WordNetSource(),
-    DatamuseSource(),
-    DatamuseFrequencySource(),
-    TatoebaSource(),
+    UrbanDictionarySource(),
+    CorporaSource(),
 ):
     REGISTRY.register(_source)
 del _source

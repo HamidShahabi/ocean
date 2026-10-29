@@ -545,6 +545,7 @@ class ReaderPage(QWidget):
                     self._stale_copy = cached  # shown instead if the refetch fails or comes back empty
                 else:
                     self.worker = None
+                    cached["_from_history"] = True
                     self._show(term, cached)
                     return
         self.panel.show_message(f"Looking up '{term}'...")

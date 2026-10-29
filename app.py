@@ -36,7 +36,8 @@ def main() -> None:
     register_custom_fonts()
     window = MainWindow()
     window.show()
-    QTimer.singleShot(0, lexical_engine.preload_offline_translator)  # once the event loop is running
+    QTimer.singleShot(0, lexical_engine.preload_wordnet)  # once the event loop is running
+    QTimer.singleShot(0, lexical_engine.preload_offline_translator)
 
     instance_server = desktop_lookup.InstanceServer(app)
     instance_server.message_received.connect(window.handle_external_lookup)

@@ -25,6 +25,17 @@ if TYPE_CHECKING:
     from ui.main_window import MainWindow
 
 
+
+def offline_badge_text(data: Dict[str, Any]) -> str:
+    """The offline-only notice, saying where this result came from."""
+    if data.get("_from_history"):
+        where = "your history (saved lookup)"
+    elif data.get("persian_source") in (lexical_engine.FA_SOURCE_SLM, lexical_engine.FA_SOURCE_NLLB):
+        where = f"Ocean's internal dictionary; Persian by the {data['persian_source']}"
+    else:
+        where = "Ocean's internal dictionary"
+    return f"Offline-only mode \u2014 result from {where}"
+
 class ResultsPage(QWidget):
     """Renders a lookup payload (word, idiom, sentence or Persian input) as a stack of cards."""
 
@@ -196,6 +207,20 @@ class ResultsPage(QWidget):
 
         return box
 
+    def _add_relation_boxes(self, layout: QVBoxLayout, items: List[Dict[str, str]]) -> None:
+        """Synonym or antonym boxes, under a heading for each sense they belong to ("noun: sloping land ...")."""
+        last_sense = None
+        for it in items:
+            sense = it.get("sense", "")
+            if sense and sense != last_sense:
+                sense_lbl = QLabel(sense)
+                sense_lbl.setObjectName("MutedText")
+                sense_lbl.setWordWrap(True)
+                sense_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                layout.addWidget(sense_lbl)
+            last_sense = sense
+            layout.addWidget(self._build_entry_with_example_box(it, radius=14, variant="card"))
+
     # === SECTION 9: STRUCTURED RESULT RENDERER (SUPPORTS BOTH WORD/IDIOM & FULL-SENTENCE STACKED LAYOUT) ===
     def _render_reverse_result(self, query_term: str, data: Dict[str, Any]) -> None:
         """Persian input: the English translation and clickable English candidates."""
@@ -303,7 +328,7 @@ class ResultsPage(QWidget):
     def render(self, query_term: str, data: Dict[str, Any]) -> None:
         self._clear_cards()
         if lexical_engine.is_offline_only():
-            badge = QLabel("Offline-only mode \u2014 results use only your history, Ocean's bundled lexicon and the offline translator")
+            badge = QLabel(offline_badge_text(data))
             badge.setObjectName("OfflineBadge")
             badge.setWordWrap(True)
             self.cards_layout.addWidget(badge)
@@ -552,6 +577,18 @@ class ResultsPage(QWidget):
                 affix_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 m_lay.addWidget(affix_lbl)
 
+                derived = data.get("derived_terms", [])
+                if derived:
+                    der_row = QHBoxLayout()
+                    der_row.setSpacing(8)
+                    d_title = QLabel("<b>Derived terms:</b>")
+                    d_title.setObjectName("BodyText")
+                    der_row.addWidget(d_title)
+                    for d_item in derived[:8]:
+                        der_row.addWidget(self._create_clickable_word_link(d_item))
+                    der_row.addStretch()
+                    m_lay.addLayout(der_row)
+
                 family_list = morph.get("family", [])
                 if family_list:
                     fam_row = QHBoxLayout()
@@ -574,8 +611,7 @@ class ResultsPage(QWidget):
                 st = QLabel("Synonyms")
                 st.setObjectName("CardTitle")
                 syn_lay.addWidget(st)
-                for s_it in syns:
-                    syn_lay.addWidget(self._build_entry_with_example_box(s_it, radius=14, variant="card"))
+                self._add_relation_boxes(syn_lay, syns)
                 vbox3.addWidget(syn_sub)
 
             if ants:
@@ -586,8 +622,7 @@ class ResultsPage(QWidget):
                 at = QLabel("Antonyms")
                 at.setObjectName("CardTitle")
                 ant_lay.addWidget(at)
-                for a_it in ants:
-                    ant_lay.addWidget(self._build_entry_with_example_box(a_it, radius=14, variant="card"))
+                self._add_relation_boxes(ant_lay, ants)
                 vbox3.addWidget(ant_sub)
 
             self.cards_layout.addWidget(card3)

@@ -10,23 +10,25 @@ import sqlite3
 import threading
 import contextvars
 from collections import OrderedDict
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Iterator, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
 
+import lexicon_db
+import offline_slm
 import word_levels
 
 
 def _get_engine_base_dir() -> str:
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(sys.executable)
-        if os.path.exists(os.path.join(exe_dir, "offline_lexicon.json")):
+        if os.path.exists(os.path.join(exe_dir, "cefr_levels.json")):
             return exe_dir
         parent = os.path.abspath(os.path.join(exe_dir, "..", ".."))
-        if os.path.exists(os.path.join(parent, "offline_lexicon.json")):
+        if os.path.exists(os.path.join(parent, "cefr_levels.json")):
             return parent
         return exe_dir
     return os.path.dirname(os.path.abspath(__file__))
@@ -111,13 +113,13 @@ def user_data_path(filename: str) -> str:
 # Bump when lookups improve (new sources, better translations, fixed bugs): saved entries produced
 # by an older version get fetched again on their next lookup (see storage.is_stale).
 # Entries saved before versions were recorded count as version 0.
-ENGINE_VERSION = 1
+ENGINE_VERSION = 2  # 2: local datasets (Kaikki, WordNet 3.1, Urban Dictionary, Tatoeba, OpenSubtitles)
 
 USER_MEMORY_FILE = user_data_path("user_memory.json")
-OFFLINE_LEXICON_FILE = os.path.join(ENGINE_BASE_DIR, "offline_lexicon.json")
 CEFR_LEVELS_FILE = os.path.join(ENGINE_BASE_DIR, "cefr_levels.json")
-OFFLINE_CORE_DB = os.path.join(ENGINE_BASE_DIR, "ocean_offline_core.db")
+LEXICON_DB_FILE = os.path.join(ENGINE_BASE_DIR, "ocean_lexicon.db")  # built by tools/build_lexicon_db.py
 OFFLINE_MT_DIR = os.path.join(ENGINE_BASE_DIR, "offline_mt_model")
+OFFLINE_SLM_DIR = os.path.join(ENGINE_BASE_DIR, "offline_slm_model")
 
 try:
     import nltk
@@ -128,7 +130,21 @@ try:
     ):
         if cand_nltk and os.path.isdir(cand_nltk) and cand_nltk not in nltk.data.path:
             nltk.data.path.insert(0, cand_nltk)
-    from nltk.corpus import wordnet as wn
+    def _installed(resource: str) -> bool:
+        for name in (resource, resource + ".zip"):  # the downloader may leave it zipped
+            try:
+                nltk.data.find(name)
+                return True
+            except LookupError:
+                pass
+        return False
+
+    # WordNet 3.1 when installed (it needs the 3.0 data too, which the lemmatizer uses)
+    if _installed("corpora/wordnet31"):
+        from nltk.corpus import wordnet31 as wn
+    else:
+        log.warning("WordNet 3.1 not installed: using WordNet 3.0")
+        from nltk.corpus import wordnet as wn
     from nltk.stem import WordNetLemmatizer
     LEMMATIZER = WordNetLemmatizer()
 except Exception:
@@ -184,36 +200,9 @@ def load_json_safe(path: str, default: Dict[str, Any]) -> Dict[str, Any]:
     return dict(default)
 
 
-OFFLINE_LEXICON = load_json_safe(OFFLINE_LEXICON_FILE, {"idioms": {}, "words": {}, "curated_senses": {}})
 USER_MEMORY = load_json_safe(USER_MEMORY_FILE, {"entries": {}, "overrides": {}})
-
-
-def query_offline_core_lexicon(term: str) -> str:
-    if not os.path.exists(OFFLINE_CORE_DB):
-        return ""
-    try:
-        with closing(sqlite3.connect(OFFLINE_CORE_DB)) as conn:
-            cur = conn.execute("SELECT fa FROM en_fa_lexicon WHERE term = ?", (term.strip().lower(),))
-            row = cur.fetchone()
-            return row[0] if row else ""
-    except Exception:
-        _log_failure("Offline core lexicon query failed")
-        return ""
-
-
-def query_offline_bnc_collocations(headword: str) -> List[Dict[str, str]]:
-    if not os.path.exists(OFFLINE_CORE_DB):
-        return []
-    try:
-        with closing(sqlite3.connect(OFFLINE_CORE_DB)) as conn:
-            cur = conn.execute(
-                "SELECT collocation, example_en FROM bnc_collocations WHERE headword = ?",
-                (headword.strip().lower(),),
-            )
-            return [{"term": r[0], "example_en": r[1]} for r in cur.fetchall()]
-    except Exception:
-        _log_failure("Offline collocation query failed")
-        return []
+LEXICON = lexicon_db.LexiconDB(LEXICON_DB_FILE)
+SLM = offline_slm.OfflineSLM(OFFLINE_SLM_DIR)
 
 
 def _load_ct2_model() -> None:
@@ -233,6 +222,21 @@ def _load_ct2_model() -> None:
             with open(vocab_p, encoding="utf-8") as vf:
                 _CT2_IS_NLLB = any(line.strip() == "pes_Arab" for line in vf)
         _SP_PROCESSOR, _CT2_TRANSLATOR = sp_proc, translator
+
+
+def preload_wordnet() -> threading.Thread:
+    """Read WordNet in the background: WordNet 3.1 takes a few seconds to load, which would otherwise
+    delay the first lookup."""
+    def run() -> None:
+        try:
+            if wn is not None:
+                wn.ensure_loaded()
+        except Exception:
+            log.exception("Could not preload WordNet")
+
+    thread = threading.Thread(target=run, name="wordnet-preload", daemon=True)
+    thread.start()
+    return thread
 
 
 def preload_offline_translator() -> threading.Thread:
@@ -280,14 +284,31 @@ def _ct2_translate(text: str, to_english: bool = False) -> str:
         return ""
 
 
+def _ct2_translate_many(texts: List[str]) -> List[str]:
+    """Offline EN->FA for many strings in one batch (much faster than one at a time); "" for each on failure."""
+    if not texts or not HAS_CT2_BACKUP:
+        return [""] * len(texts)
+    try:
+        _load_ct2_model()
+        if _CT2_TRANSLATOR is None or _SP_PROCESSOR is None:
+            return [""] * len(texts)
+        batch = [_SP_PROCESSOR.encode(t, out_type=str) for t in texts]
+        if _CT2_IS_NLLB:
+            res = _CT2_TRANSLATOR.translate_batch([["eng_Latn"] + toks + ["</s>"] for toks in batch],
+                                                  target_prefix=[["pes_Arab"]] * len(batch), beam_size=2)
+            return [_SP_PROCESSOR.decode(r.hypotheses[0][1:]).strip() for r in res]
+        res = _CT2_TRANSLATOR.translate_batch(batch, beam_size=2)
+        return [_SP_PROCESSOR.decode(r.hypotheses[0]).strip() for r in res]
+    except Exception:
+        _log_failure(f"Offline batch translation of {len(texts)} strings failed")
+        return [""] * len(texts)
+
+
 def translate_offline_backup(text: str, is_short: bool = False) -> str:
-    """Used strictly as a backup when internet connection is unavailable."""
+    """The offline NLLB translator, normalized; "" without the model."""
     clean = text.strip()
     if not clean:
         return ""
-    db_hit = query_offline_core_lexicon(clean.lower())
-    if db_hit:
-        return normalize_persian(db_hit, is_short_term=is_short, source_en=clean)
     decoded = _ct2_translate(clean)
     return normalize_persian(decoded, is_short_term=is_short, source_en=clean) if decoded else ""
 
@@ -433,16 +454,6 @@ INVALID_FA_HEADERS = {
     "\u0627\u0635\u0637\u0644\u0627\u062d", "\u06a9\u0644\u0645\u0647", "\u0639\u0628\u0627\u0631\u062a",
     "\u06af\u0627\u062f", "\u0633\u0627\u0646\u06af", "\u0628\u06cc \u0644\u06cc\u062a", "\u067e\u0644\u0627\u062a\u0648\u0646",
     "\u06af\u0648\u067e", "\u06af\u0627\u0646\u06a9", "\u06af\u0648"
-}
-
-CURATED_SYNONYMS_MAP = {
-    "gallivant": ["roam", "wander", "ramble"],
-    "beseech": ["implore", "entreat", "beg"],
-    "snug": ["tight", "close-fitting", "cozy"],
-    "bashful": ["shy", "timid", "diffident"],
-    "platoon": ["squad", "troop", "detachment"],
-    "purse": ["handbag", "pouch"],
-    "gunk": ["grime", "sludge", "muck"],
 }
 
 # === SECTION 2: MORPHOLOGICAL AFFIX RULES & CONTRACTION / PRONOUN IPA MAP ===
@@ -677,7 +688,6 @@ def normalize_persian(text: str, is_short_term: bool = False, source_en: str = "
     t = re.sub(r"^[0-9\u06f0-\u06f9]+[\.\-\)\s]+", "", t)
     t = re.sub(r"[\.\-\(\s]+[0-9\u06f0-\u06f9]+$", "", t)
     t = re.sub(r"\s*[0-9\u06f0-\u06f9]+\.\s*", " ", t)
-    t = t.replace("\u067e\u0644\u0627\u062a\u0648\u0646", "\u062f\u0633\u062a\u0647 \u0633\u0631\u0628\u0627\u0632\u0627\u0646")
     t = re.sub(r"\s+", " ", t).strip()
     if is_short_term:
         t = t.rstrip(".\u06d4!?\u061f;:\u061b").strip()
@@ -797,6 +807,9 @@ def convert_token_to_ipa(token: str) -> str:
                 return res
         except Exception:
             pass
+    known = LEXICON.ipa(low)  # Wiktionary covers many words the CMU-based engine doesn't
+    if known:
+        return known.strip("/").split(",")[0].strip()
     return fallback_word_g2p(low)
 
 
@@ -952,75 +965,12 @@ def analyze_morphology(term: str) -> Dict[str, Any]:
     }
 
 
-# === SECTION 6: WIKIDATA / WIKIPEDIA INTERLANGUAGE LINKS & HYBRID TRANSLATOR ===
-def fetch_wikipedia_persian_interlanguage_title(term: str) -> str:
-    clean = term.strip()
-    if _OFFLINE_ONLY or not clean or len(clean.split()) > 4:
-        return ""
-    try:
-        r = smart_request(
-            "GET",
-            "https://en.wikipedia.org/w/api.php",
-            params={
-                "action": "query",
-                "titles": clean,
-                "prop": "langlinks",
-                "lllang": "fa",
-                "redirects": "1",
-                "format": "json",
-            },
-            timeout=2.2,
-        )
-        if r.ok:
-            pages = r.json().get("query", {}).get("pages", {})
-            for p_info in pages.values():
-                lls = p_info.get("langlinks", [])
-                if lls and lls[0].get("*"):
-                    fa_title = normalize_persian(lls[0]["*"], is_short_term=True)
-                    fa_title = re.sub(r"\s*\([^)]*\)", "", fa_title).strip()
-                    if fa_title:
-                        return fa_title
-    except Exception:
-        _log_failure(f"Wikipedia title lookup failed for {term!r}")
-    return ""
-
-
+# === SECTION 6: TWO-TIER ENGLISH -> PERSIAN TRANSLATOR ===
 def clean_definition_for_idiom_meaning(def_text: str) -> str:
     s = def_text.strip().rstrip(".")
     s = re.sub(r"^(To|Being|Feeling|Something that is|A|An)\s+", "", s, flags=re.IGNORECASE)
     s = re.split(r"[;:]|\s+,\s+or\s+|\s+so that\s+|\s+because\s+", s)[0].strip()
     return s
-
-
-def substitute_idiom_in_sentence(sentence: str, idiom: str, meaning_en: str) -> str:
-    if not sentence or not idiom or not meaning_en:
-        return sentence
-    words = idiom.strip().split()
-    if len(words) < 2:
-        return sentence
-
-    first_w = words[0].lower()
-    verb_variants = {
-        "bite": r"(?:bite|bites|bit|bitten|biting)",
-        "cut": r"(?:cut|cuts|cutting)",
-        "spill": r"(?:spill|spills|spilled|spilt|spilling)",
-        "let": r"(?:let|lets|letting)",
-        "break": r"(?:break|breaks|broke|broken|breaking)",
-        "hit": r"(?:hit|hits|hitting)",
-        "call": r"(?:call|calls|called|calling)",
-        "cost": r"(?:cost|costs|costing)",
-        "follow": r"(?:follow|follows|followed|following)",
-        "take": r"(?:take|takes|took|taken|taking)",
-        "get": r"(?:get|gets|got|gotten|getting)",
-        "seek": r"(?:seek|seeks|sought|seeking)",
-    }
-    first_pat = verb_variants.get(first_w, rf"{re.escape(first_w)}\w*")
-    rest_pat = r"\s+".join(rf"{re.escape(w)}\w*" for w in words[1:])
-    full_pat = re.compile(rf"\b{first_pat}\s+{rest_pat}\b", re.IGNORECASE)
-
-    if full_pat.search(sentence):
-        return full_pat.sub(meaning_en, sentence)
-    return sentence
 
 
 def _clients5(text: str, source: str, target: str) -> str:
@@ -1052,20 +1002,59 @@ def translate_via_clients5(text: str, is_short: bool = False) -> str:
     return normalize_persian(raw, is_short_term=is_short, source_en=clean) if raw else ""
 
 
-def translate_single_string(text: str, is_short: bool = False) -> str:
+# Where a Persian translation came from (shown on results; "offline" ones are marked in offline-only mode).
+FA_SOURCE_EDIT = "your edit"
+FA_SOURCE_WIKTIONARY = "Wiktionary"
+FA_SOURCE_GOOGLE = "Google Translate"
+FA_SOURCE_SLM = "offline language model"
+FA_SOURCE_NLLB = "offline translator"
+ONLINE_FA_SOURCES = {FA_SOURCE_GOOGLE}
+
+
+def local_translation(text: str, is_short: bool = False) -> Tuple[str, str]:
+    """Tier 1, the local database: (Persian, source) or ("", "").
+
+    A phrase or sentence found whole in Tatoeba or OpenSubtitles takes its human translation: the natural
+    everyday rendering ("good morning" -> صبح بخیر), which Wiktionary's lists often lack. A word (or a phrase
+    the corpora don't have) takes Wiktionary's translations of its main part of speech (an inflected form, its
+    lemma's): the best one for the first sense, plus one for the second sense when the corpora attest it, so
+    the money "bank" and the river "bank" are not run together. Among a sense's alternatives, the one used most
+    in the corpora's translations of sentences containing the word wins. A lone word never takes a corpus line:
+    that is often a name or a shout ("Run!"), not its meaning."""
     clean = text.strip()
     if not clean:
-        return ""
-    low = clean.lower()
+        return "", ""
+    words = clean.split()
+    if len(words) >= 2:
+        fa, corpus = LEXICON.translation_pair(clean)
+        fa = normalize_persian(fa, is_short_term=is_short, source_en=clean)
+        if fa:
+            return fa, "Tatoeba" if corpus == "tatoeba" else "OpenSubtitles"
+    if len(words) > 4:
+        return "", ""
+    entries = LEXICON.entries(clean)
+    main_pos = entries[0]["pos"] if entries else ""
+    by_sense: Dict[str, List[str]] = {}
+    for t in LEXICON.persian(entries[0]["word"] if entries else clean):
+        fa = normalize_persian(t["fa"], is_short_term=True, source_en=clean)
+        if fa and (not main_pos or t["pos"] == main_pos):  # a noun's translation is no answer for a verb
+            by_sense.setdefault(t["sense"], [])
+            if fa not in by_sense[t["sense"]]:
+                by_sense[t["sense"]].append(fa)
+    if not by_sense:
+        return "", ""
+    pairs = LEXICON.examples(entries[0]["word"] if entries else clean, limit=200, min_words=1, max_words=40)
 
-    if low in USER_MEMORY.get("overrides", {}):
-        return USER_MEMORY["overrides"][low]
-    if low in OFFLINE_LEXICON.get("idioms", {}):
-        return OFFLINE_LEXICON["idioms"][low]["fa"]
-    if low in OFFLINE_LEXICON.get("words", {}):
-        return OFFLINE_LEXICON["words"][low]
+    def attested(fa: str) -> int:
+        return sum(fa in p["fa"] for p in pairs)
 
-    # 1. Primary: Google GTX Bilingual Dictionary & Translator (never in offline-only mode)
+    best = [max(cands, key=attested) for cands in list(by_sense.values())[:2]]  # max keeps the first on ties
+    chosen = best[:1] + [fa for fa in best[1:] if fa != best[0] and attested(fa)]
+    return " \u060c ".join(chosen), FA_SOURCE_WIKTIONARY
+
+
+def _google_translate(clean: str, is_short: bool) -> str:
+    """The optional online layer (never in offline-only mode): Google's gtx endpoint, then clients5."""
     try:
         r = None if _OFFLINE_ONLY else smart_request(
             "GET",
@@ -1092,52 +1081,52 @@ def translate_single_string(text: str, is_short: bool = False) -> str:
                     return norm
     except Exception:
         _log_failure(f"Google translate failed for {clean!r}")
-
-    # 2. Secondary: Clients5 Endpoint
-    c5 = translate_via_clients5(clean, is_short=is_short)
-    if c5:
-        return c5
-
-    # 3. Third: WordNet Gloss Semantic Translation for slang/rare words
-    if is_short and wn and len(clean.split()) <= 2:
-        syns = wn.synsets("_".join(clean.split()))
-        if syns:
-            gloss = syns[0].definition().split(";")[0].strip()
-            gloss = re.sub(r"^\([^)]+\)\s*", "", gloss)
-            tr_g = translate_offline_backup(gloss) if _OFFLINE_ONLY else translate_via_clients5(gloss, is_short=False)
-            if tr_g:
-                return normalize_persian(tr_g, is_short_term=True)
-
-    # 4. Fourth: Local Offline SQLite & CTranslate2 Backup (when internet is disconnected)
-    off_b = translate_offline_backup(clean, is_short=is_short)
-    if off_b:
-        return off_b
-
-    return "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f" if is_short else ""
+    return translate_via_clients5(clean, is_short=is_short)
 
 
-def fetch_persian_word_meaning(term: str, is_idiom: bool = False) -> str:
-    clean = term.strip()
-    low = clean.lower()
+def translate_with_source(text: str, is_short: bool = False, use_slm: bool = False) -> Tuple[str, str]:
+    """(Persian, source) through the tiers: your edits, the local database, Google when online, then offline
+    the language model (with use_slm: for the headword, an idiom or a sentence; it takes a second or two)
+    and the NLLB translator. ("", "") when nothing translates it."""
+    clean = text.strip()
+    if not clean:
+        return "", ""
+    override = USER_MEMORY.get("overrides", {}).get(clean.lower())
+    if override:
+        return override, FA_SOURCE_EDIT
+    fa, source = local_translation(clean, is_short=is_short)
+    if fa:
+        return fa, source
+    fa = "" if _OFFLINE_ONLY else _google_translate(clean, is_short)
+    if fa:
+        return fa, FA_SOURCE_GOOGLE
+    if use_slm:
+        fa = normalize_persian(SLM.translate(clean), is_short_term=is_short, source_en=clean)
+        if fa:
+            return fa, FA_SOURCE_SLM
+    fa = translate_offline_backup(clean, is_short=is_short)
+    return (fa, FA_SOURCE_NLLB) if fa else ("", "")
 
-    if low in USER_MEMORY.get("overrides", {}):
-        return USER_MEMORY["overrides"][low]
-    if low in USER_MEMORY.get("entries", {}):
-        return USER_MEMORY["entries"][low].get("fa", "")
-    if low in OFFLINE_LEXICON.get("idioms", {}):
-        return OFFLINE_LEXICON["idioms"][low]["fa"]
-    if low in OFFLINE_LEXICON.get("words", {}):
-        return OFFLINE_LEXICON["words"][low]
 
-    if is_idiom and len(clean.split()) <= 3:
-        wiki_fa = fetch_wikipedia_persian_interlanguage_title(clean)
-        if wiki_fa:
-            return wiki_fa
+def translate_single_string(text: str, is_short: bool = False) -> str:
+    fa, _ = translate_with_source(text, is_short=is_short)
+    return fa or (NOT_FOUND_FA if is_short else "")
 
-    return translate_single_string(clean, is_short=not is_idiom)
+
+def fetch_persian_word_meaning(term: str, is_idiom: bool = False, use_slm: Optional[bool] = None) -> Tuple[str, str]:
+    """(Persian, source) for a looked-up word or phrase; your taught entries come right after your edits.
+    The language model is asked for an idiom unless use_slm says otherwise."""
+    low = term.strip().lower()
+    taught = USER_MEMORY.get("entries", {}).get(low, {}).get("fa", "")
+    if taught and low not in USER_MEMORY.get("overrides", {}):
+        return taught, FA_SOURCE_EDIT
+    return translate_with_source(term, is_short=not is_idiom, use_slm=is_idiom if use_slm is None else use_slm)
 
 
 def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[str, str]:
+    """Persian for many strings at once: local first, then one Google request for the remaining sentences, then
+    Google for each leftover, then the NLLB translator for the rest in one batch (the language model is too
+    slow for a batch)."""
     all_items = [x.strip() for x in dict.fromkeys(sentences + short_terms) if x and x.strip()]
     if not all_items:
         return {}
@@ -1148,13 +1137,10 @@ def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[s
     remaining_shorts: List[str] = []
 
     for item in all_items:
-        low = item.lower()
-        if low in USER_MEMORY.get("overrides", {}):
-            out[item] = USER_MEMORY["overrides"][low]
-        elif low in OFFLINE_LEXICON.get("idioms", {}):
-            out[item] = OFFLINE_LEXICON["idioms"][low]["fa"]
-        elif low in OFFLINE_LEXICON.get("words", {}):
-            out[item] = OFFLINE_LEXICON["words"][low]
+        override = USER_MEMORY.get("overrides", {}).get(item.lower())
+        local = override or local_translation(item, is_short=item in short_set)[0]
+        if local:
+            out[item] = local
         elif item in short_set:
             remaining_shorts.append(item)
         else:
@@ -1182,82 +1168,83 @@ def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[s
             _log_failure("Batch translation failed")
 
     still_missing = [x for x in (remaining_sentences + remaining_shorts) if not out.get(x)]
-    if still_missing:
+    if still_missing and not _OFFLINE_ONLY:  # Google, one at a time
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futs = {item: submit_in_context(pool, translate_single_string, item, item in short_set) for item in still_missing}
+            futs = {item: submit_in_context(pool, _google_translate, item, item in short_set) for item in still_missing}
             for item, fut in futs.items():
-                res = fut.result()
-                out[item] = res or ("\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f" if item in short_set else "")
-
+                out[item] = fut.result()
+    still_missing = [x for x in still_missing if not out.get(x)]
+    for item, fa in zip(still_missing, _ct2_translate_many(still_missing)):  # the rest offline, in one batch
+        out[item] = normalize_persian(fa, is_short_term=item in short_set, source_en=item) if fa else ""
+    for item in still_missing:
+        if not out[item] and item in short_set:
+            out[item] = NOT_FOUND_FA
     return out
 
 
 # === SECTION 7: SENTENCE KEY-TERM EXTRACTOR & MULTI-DICTIONARY ANALYZERS ===
-def extract_sentence_key_terms(sentence: str) -> List[Dict[str, str]]:
-    clean = re.sub(r"[^a-zA-Z\s\-']", " ", sentence).strip()
-    tokens = [t for t in clean.split() if t]
-    extracted: List[Dict[str, str]] = []
-    seen = set()
-    low_sent = sentence.lower()
-
-    for idiom_key, info in OFFLINE_LEXICON.get("idioms", {}).items():
-        if idiom_key in low_sent and idiom_key not in seen:
-            seen.add(idiom_key)
-            extracted.append({
-                "term": idiom_key,
-                "ipa": to_ipa_us(idiom_key),
-                "pos": "Idiom / Compound",
-                "def": info["def"],
-                "fa": info["fa"],
-            })
-
-    if wn and len(tokens) >= 2:
-        for i in range(len(tokens) - 1):
-            pair = f"{tokens[i]} {tokens[i+1]}"
-            pair_low = pair.lower()
-            if pair_low in seen:
-                continue
-            syns = wn.synsets(f"{tokens[i].lower()}_{tokens[i+1].lower()}")
-            if syns:
-                seen.add(pair_low)
-                seen.add(tokens[i].lower())
-                seen.add(tokens[i+1].lower())
-                pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
-                fa_eq = fetch_persian_word_meaning(pair_low, is_idiom=True)
-                extracted.append({
-                    "term": pair_low,
-                    "ipa": to_ipa_us(pair_low),
-                    "pos": pos_map.get(syns[0].pos(), "Compound Term"),
-                    "def": clean_english_sentence(syns[0].definition()),
-                    "fa": fa_eq,
-                })
-
+def first_definition(term: str) -> Tuple[str, str]:
+    """(part of speech, definition) of a term's first Wiktionary sense, else its first WordNet sense, else ("", "")."""
+    for e in LEXICON.entries(term):
+        for sense in e["senses"]:
+            if not is_grammatical_form_of_gloss(sense["def"]):
+                return e["pos"], clean_english_sentence(sense["def"])
     if wn:
-        pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
-        for tok in tokens:
-            low_t = tok.lower().strip("-'")
-            if len(low_t) < 3 or low_t in STOPWORDS or low_t in seen:
-                continue
-            lemma = LEMMATIZER.lemmatize(low_t, "v") if LEMMATIZER else low_t
-            if lemma == low_t and LEMMATIZER:
+        syns = wn.synsets("_".join(term.lower().split()))
+        if syns:
+            pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
+            return pos_map.get(syns[0].pos(), "Word"), clean_english_sentence(syns[0].definition())
+    return "", ""
+
+
+def extract_sentence_key_terms(sentence: str) -> List[Dict[str, str]]:
+    """Up to five terms worth explaining: dictionary phrases of two to four words first (idioms, phrasal
+    verbs, compounds), then content words by their base form."""
+    tokens = [t for t in re.sub(r"[^a-zA-Z\s\-']", " ", sentence).split() if t]
+    low_tokens = [t.lower().strip("-'") for t in tokens]
+    extracted: List[Dict[str, str]] = []
+    covered: set = set()
+
+    def add(term: str, pos: str, definition: str) -> None:
+        extracted.append({
+            "term": term,
+            "ipa": to_ipa_us(term),
+            "pos": pos or "Word",
+            "def": definition,
+            # Not the language model: at a second or two per term, it is kept for the whole sentence.
+            "fa": fetch_persian_word_meaning(term, is_idiom=" " in term, use_slm=False)[0] or NOT_FOUND_FA,
+        })
+
+    for n in (4, 3, 2):
+        for i in range(len(low_tokens) - n + 1):
+            span = range(i, i + n)
+            if covered.intersection(span) or low_tokens[i] in ("the", "a", "an") \
+                    or all(t in STOPWORDS for t in low_tokens[i:i + n]):
+                continue  # "the storm" is just "storm"
+            phrase = " ".join(low_tokens[i:i + n])
+            if LEXICON.has_entry(phrase) or (wn and wn.synsets(phrase.replace(" ", "_"))):
+                pos, definition = first_definition(phrase)
+                if definition:
+                    covered.update(span)
+                    add(phrase, "Idiom / Compound" if n > 2 or pos in ("Idiom / Expression", "Verb") else pos, definition)
+
+    seen = {e["term"] for e in extracted}
+    for i, low_t in enumerate(low_tokens):
+        if len(extracted) >= 5:
+            break
+        if i in covered or len(low_t) < 3 or low_t in STOPWORDS:
+            continue
+        lemma = low_t
+        if LEMMATIZER:
+            lemma = LEMMATIZER.lemmatize(low_t, "v")
+            if lemma == low_t:
                 lemma = LEMMATIZER.lemmatize(low_t, "n")
-            if lemma in STOPWORDS or lemma in seen:
-                continue
-            syns = wn.synsets(lemma) or wn.synsets(low_t)
-            if syns:
-                seen.add(low_t)
-                seen.add(lemma)
-                s0 = syns[0]
-                fa_w = fetch_persian_word_meaning(lemma, is_idiom=False)
-                extracted.append({
-                    "term": lemma,
-                    "ipa": to_ipa_us(lemma),
-                    "pos": pos_map.get(s0.pos(), "Word"),
-                    "def": clean_english_sentence(s0.definition()),
-                    "fa": fa_w,
-                })
-            if len(extracted) >= 5:
-                break
+        if lemma in STOPWORDS or lemma in seen:
+            continue
+        pos, definition = first_definition(lemma)
+        if definition:
+            seen.add(lemma)
+            add(lemma, pos, definition)
 
     return extracted[:5]
 
@@ -1269,66 +1256,41 @@ def _dictionary_sources():
 
 
 def fetch_live_suggestions(prefix: str) -> List[str]:
+    """Completions as you type: your taught entries, then dictionary headwords, most frequent first."""
     q = prefix.strip()
-    if len(q) < 2 or len(q.split()) > 5:
+    if len(q) < 2 or len(q.split()) > 5 or is_persian_text(q):
         return []
     user_keys = [k for k in USER_MEMORY.get("entries", {}) if k.startswith(q.lower())]
-    local_idioms = [k for k in OFFLINE_LEXICON.get("idioms", {}) if k.startswith(q.lower())]
-    if is_persian_text(q):
-        return []  # Datamuse is English-only; the app still offers matching history entries
-    sources = _dictionary_sources()
-    datamuse = sources.REGISTRY.usable("datamuse", sources.LookupContext(term=q, offline=_OFFLINE_ONLY))
-    remote = datamuse.suggest(q) if datamuse else []
-    return list(dict.fromkeys(user_keys + local_idioms + remote))[:7]
-
-
-def generate_pos_matched_example(term: str, pos: str) -> str:
-    w = term.strip().lower()
-    p = pos.lower()
-    if "verb" in p:
-        return f"They decided to {w} the matter carefully before acting."
-    if "adj" in p:
-        return f"The gear felt secure and {w} during the entire journey."
-    if "adv" in p:
-        return f"She acted {w} to make sure every detail was clear."
-    if "idiom" in p or "phrase" in p or " " in w:
-        return f"In challenging moments, sometimes you have to {w} and move forward."
-    return f"The {w} had to be cleaned thoroughly before we could continue."
+    return list(dict.fromkeys(user_keys + LEXICON.suggestions(q)))[:7]
 
 
 def fetch_verified_example_for_relation(word: str, target_pos: str = "") -> str:
+    """A real example sentence for a synonym or antonym: WordNet's (of the wanted part of speech first),
+    then Wiktionary's, then a corpus sentence; "" when none contains the word."""
     clean = word.strip()
-    low = clean.lower()
-    if low in OFFLINE_LEXICON.get("idioms", {}):
-        return OFFLINE_LEXICON["idioms"][low]["example"]
-
     pos_code_map = {"Noun": "n", "Verb": "v", "Adjective": "a", "Adverb": "r"}
     want_pos = pos_code_map.get(target_pos, "")
 
     if wn:
         try:
             synsets = wn.synsets("_".join(clean.split()))
-            for syn in synsets:
-                if want_pos and syn.pos().replace("s", "a") != want_pos:
-                    continue
+            ranked = [s for s in synsets if not want_pos or s.pos().replace("s", "a") == want_pos] + synsets[:4]
+            for syn in ranked:
                 for ex in syn.examples():
-                    if sentence_contains_target(ex, clean) and len(ex.split()) >= 5 and "'" not in ex:
-                        return clean_english_sentence(ex)
-            for syn in synsets[:4]:
-                for ex in syn.examples():
-                    if sentence_contains_target(ex, clean) and len(ex.split()) >= 5 and "'" not in ex:
+                    if sentence_contains_target(ex, clean) and len(ex.split()) >= 5:
                         return clean_english_sentence(ex)
         except Exception:
             _log_failure(f"WordNet example lookup failed for {word!r}")
 
-    sources = _dictionary_sources()
-    api = sources.REGISTRY.usable("dictionaryapi", sources.LookupContext(term=clean, offline=_OFFLINE_ONLY))
-    if api:
-        example = api.find_example(clean, target_pos)
-        if example:
-            return example
-
-    return generate_pos_matched_example(clean, target_pos or "Noun")
+    entries = LEXICON.entries(clean)
+    entries.sort(key=lambda e: e["pos"] != target_pos)
+    for e in entries:
+        for sense in e["senses"]:
+            if sense["example"] and sentence_contains_target(sense["example"], clean):
+                return clean_english_sentence(sense["example"])
+    for ex in LEXICON.examples(clean, limit=1):
+        return ex["en"]
+    return ""
 
 
 def is_grammatical_form_of_gloss(text: str) -> bool:
@@ -1372,18 +1334,16 @@ def fa_key(text: str) -> str:
 
 
 def reverse_lookup_local(fa: str) -> List[str]:
-    """English terms whose stored Persian meaning matches: your fixes and taught words first,
-    then Ocean's bundled lexicon. Meanings are compared per comma-separated part."""
+    """English terms whose Persian meaning matches: your fixes first, then Wiktionary's translations.
+    Your fixes are compared per comma-separated part."""
     target = fa_key(fa)
     if not target:
         return []
-    pairs = list(USER_MEMORY.get("overrides", {}).items())
-    pairs += [(en, d.get("fa", "")) for en, d in OFFLINE_LEXICON.get("idioms", {}).items()]
-    pairs += [(en, v if isinstance(v, str) else "") for en, v in OFFLINE_LEXICON.get("words", {}).items()]
-    hits = []
-    for en, fa_val in pairs:
-        if any(fa_key(part) == target for part in re.split(r"[\u060c,]", fa_val or "")):
-            hits.append(en)
+    hits = [
+        en for en, fa_val in USER_MEMORY.get("overrides", {}).items()
+        if any(fa_key(part) == target for part in re.split(r"[\u060c,]", fa_val or ""))
+    ]
+    hits += LEXICON.english_for_persian(target)
     return list(dict.fromkeys(hits))
 
 
@@ -1435,10 +1395,10 @@ def analyze_persian(raw: str) -> Dict[str, Any]:
     local = reverse_lookup_local(query)
     machine = translation
     if local and not is_sentence:
-        # Curated meanings (your fixes, taught words, Ocean's idiom list) beat literal machine output,
+        # Your fixes and dictionary translations beat literal machine output,
         # e.g. an idiom Google translates word for word.
         translation = local[0]
-    found = [{"term": en, "pos": "your entries & Ocean lexicon"} for en in local]
+    found = [{"term": en, "pos": "your entries & Wiktionary"} for en in local]
     # Offline NLLB turns isolated words into sentences ("It's too soon."), so only online output becomes a word.
     if machine and not offline and not is_sentence and len(machine.split()) <= 4:
         machine_cand = machine.rstrip(".") if " " not in machine else machine
@@ -1489,6 +1449,51 @@ def analyze_with_dictionaries(term: str) -> Dict[str, Any]:
         return _analyze_with_dictionaries(term)
 
 
+def _empty_morphology(term: str) -> Dict[str, Any]:
+    return {"root": term, "structure": term, "prefix": "None", "suffix": "None", "family": []}
+
+
+def _relation_items(items: List[Dict[str, str]], clean: str, root_lemma: str, limit: int, per_sense: int) -> List[Dict[str, str]]:
+    """Synonyms or antonyms, unique and grouped by sense: at most `per_sense` from one sense, `limit` in all."""
+    out: List[Dict[str, str]] = []
+    seen: set = set()
+    per: Dict[str, int] = {}
+    for it in items:
+        term, sense = it["term"], it.get("sense", "")
+        if term.lower() in seen or is_spelling_or_root_duplicate(term, clean, root_lemma) or term.lower() in WEAK_SYNONYMS:
+            continue
+        if per.get(sense, 0) >= per_sense:
+            continue
+        seen.add(term.lower())
+        per[sense] = per.get(sense, 0) + 1
+        out.append({"term": term, "sense": sense})
+        if len(out) >= limit:
+            break
+    order = list(dict.fromkeys(i["sense"] for i in out))
+    return sorted(out, key=lambda it: order.index(it["sense"]))  # each sense's words together
+
+
+def _analyze_sentence(clean: str) -> Dict[str, Any]:
+    key_terms = extract_sentence_key_terms(clean)
+    fa_sent, fa_source = translate_with_source(clean, is_short=False, use_slm=True)
+    return {
+        "headword": clean,
+        "is_sentence": True,
+        "is_idiom": True,
+        "did_you_mean": "",
+        "ipa_us": sentence_to_ipa(clean),
+        "persian_equivalent": fa_sent or NOT_FOUND_FA,
+        "persian_source": fa_source,
+        "senses": [],
+        "sentence_breakdown": key_terms,
+        "collocations": [],
+        "derived_terms": [],
+        "morphology": _empty_morphology(clean),
+        "synonyms": [],
+        "antonyms": [],
+    }
+
+
 def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
     raw_input = term.strip()
     if is_persian_text(raw_input):
@@ -1497,57 +1502,26 @@ def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
     is_full_sentence = len(words) >= 5 or (len(words) >= 4 and raw_input.endswith((".", "!", "?")))
     clean = auto_correct_english_input(raw_input, is_sentence=is_full_sentence)
     low = clean.lower()
-
-    # --- DEDICATED FULL-SENTENCE MODE ---
     if is_full_sentence:
-        key_terms = extract_sentence_key_terms(clean)
-        contextual_en = clean
-        for kt in key_terms:
-            t_low = kt["term"].lower()
-            if t_low in OFFLINE_LEXICON.get("idioms", {}):
-                meaning_hint = OFFLINE_LEXICON["idioms"][t_low]["meaning_en"]
-                contextual_en = re.sub(rf"\b{re.escape(t_low)}\b", meaning_hint, contextual_en, flags=re.IGNORECASE)
+        return _analyze_sentence(clean)
 
-        fa_sent = USER_MEMORY.get("overrides", {}).get(low, "")
-        if not fa_sent:
-            fa_sent = translate_via_clients5(contextual_en, is_short=False) or translate_single_string(contextual_en, is_short=False)
-
-        return {
-            "headword": clean,
-            "is_sentence": True,
-            "is_idiom": True,
-            "did_you_mean": "",
-            "ipa_us": sentence_to_ipa(clean),
-            "persian_equivalent": fa_sent or "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f",
-            "senses": [],
-            "sentence_breakdown": key_terms,
-            "collocations": [],
-            "morphology": {"root": clean, "structure": clean, "prefix": "None", "suffix": "None", "family": []},
-            "synonyms": [],
-            "antonyms": [],
-        }
-
-    # --- STANDARD WORD OR IDIOM HYBRID MODE ---
+    # --- WORD OR PHRASE ---
     is_idiom_or_phrase = len(words) >= 2
-    morphology = analyze_morphology(clean) if not is_idiom_or_phrase else {
-        "root": clean, "structure": clean, "prefix": "None", "suffix": "None", "family": []
-    }
+    morphology = analyze_morphology(clean) if not is_idiom_or_phrase else _empty_morphology(clean)
     root_lemma = morphology.get("root", clean)
 
     sources = _dictionary_sources()
-    ctx = sources.LookupContext(
-        term=clean, is_idiom=is_idiom_or_phrase, root_lemma=root_lemma, offline=_OFFLINE_ONLY
-    )
+    ctx = sources.LookupContext(term=clean, is_idiom=is_idiom_or_phrase, root_lemma=root_lemma)
     with ThreadPoolExecutor(max_workers=1) as pool:
         f_fa = submit_in_context(pool, fetch_persian_word_meaning, clean, is_idiom_or_phrase)
         merged = sources.REGISTRY.run(ctx)  # every enabled dictionary source, merged in registry order
-        fa_main = f_fa.result()
+        fa_main, fa_source = f_fa.result()
 
     did_you_mean = ""
     if not merged.senses and len(words) == 1:
-        sugs = fetch_live_suggestions(clean)
-        if sugs and sugs[0].lower() != low:
-            did_you_mean = sugs[0]
+        close = LEXICON.close_matches(clean)
+        if close and close[0].lower() != low:
+            did_you_mean = close[0]
 
     ipa_us = merged.ipa_us or to_ipa_us(clean)
 
@@ -1561,162 +1535,124 @@ def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
                 "example_en": ue.get("example_en", ""),
                 "example_fa": ue.get("example_fa", ""),
             })
-    if low in OFFLINE_LEXICON.get("curated_senses", {}):
-        priority_senses.extend(OFFLINE_LEXICON["curated_senses"][low])
 
     all_raw_senses = priority_senses + merged.senses
+    # Corpus sentences pair an example with its human translation; one containing the term is used for a
+    # sense that has no example of its own.
+    corpus_examples = [tp for tp in merged.examples if sentence_contains_target(tp["en"], clean)]
 
     used_examples = set()
     selected_senses: List[Dict[str, str]] = []
+
+    def pick_example(s: Dict[str, str]) -> Tuple[str, str]:
+        ex_en = s.get("example_en", "").strip()
+        ex_fa = s.get("example_fa", "").strip()
+        if ex_en and ex_en.lower() in used_examples:
+            ex_en, ex_fa = "", ""
+        if not ex_en:
+            for tp in corpus_examples:
+                if tp["en"].lower() not in used_examples:
+                    ex_en, ex_fa = tp["en"], tp["fa"]
+                    break
+        if ex_en:
+            used_examples.add(ex_en.lower())
+        return ex_en, ex_fa
 
     for s in all_raw_senses:
         d_txt = s["def"]
         if is_grammatical_form_of_gloss(d_txt) or any(is_similar_def(d_txt, ex["def"]) for ex in selected_senses):
             continue
-
-        pos_label = "Idiom / Expression" if is_idiom_or_phrase else s.get("pos", "Noun")
-        ex_en = s.get("example_en", "").strip()
-        ex_fa_preset = s.get("example_fa", "").strip()
-
-        if ex_en and ex_en.lower() in used_examples:
-            ex_en = ""
-            ex_fa_preset = ""
-
-        if not ex_en and merged.examples:
-            for tp in merged.examples:
-                if tp["en"].lower() not in used_examples:
-                    ex_en = tp["en"]
-                    ex_fa_preset = tp["fa"]
-                    break
-
-        if not ex_en:
-            ex_en = generate_pos_matched_example(clean, pos_label)
-        used_examples.add(ex_en.lower())
-
+        ex_en, ex_fa = pick_example(s)
         selected_senses.append({
-            "pos": pos_label,
+            "pos": "Idiom / Expression" if is_idiom_or_phrase and s.get("pos") != "Slang" else s.get("pos", "Noun"),
             "def": d_txt,
             "example_en": ex_en,
-            "example_ipa": sentence_to_ipa(ex_en),
-            "example_fa": ex_fa_preset,
+            "example_ipa": sentence_to_ipa(ex_en) if ex_en else "",
+            "example_fa": ex_fa,
         })
         if len(selected_senses) >= 3:
             break
 
+    # One sense of each further part of speech (a verb sense of "bank", a slang sense), up to two more.
     existing_pos = {s["pos"] for s in selected_senses}
     for s in all_raw_senses:
         s_pos = s.get("pos", "")
-        if s_pos and s_pos not in existing_pos and not is_idiom_or_phrase:
-            ex_en = s.get("example_en", "").strip() or generate_pos_matched_example(clean, s_pos)
+        if len(selected_senses) >= 5:
+            break
+        if s_pos and s_pos not in existing_pos and (not is_idiom_or_phrase or s_pos == "Slang") \
+                and not is_grammatical_form_of_gloss(s["def"]):
+            ex_en, ex_fa = pick_example(s)
             selected_senses.append({
                 "pos": s_pos,
                 "def": s["def"],
                 "example_en": ex_en,
-                "example_ipa": sentence_to_ipa(ex_en),
-                "example_fa": s.get("example_fa", ""),
+                "example_ipa": sentence_to_ipa(ex_en) if ex_en else "",
+                "example_fa": ex_fa,
             })
             existing_pos.add(s_pos)
-            break
 
     primary_pos = selected_senses[0]["pos"] if selected_senses else "Noun"
 
-    # Collocations: Merge Longman + Local BNC Collocations + Datamuse POS-matched Collocations
     colls_raw: List[Dict[str, str]] = []
     if not is_idiom_or_phrase:
         seen_col = set()
-        for c in merged.collocations + query_offline_bnc_collocations(clean):
+        for c in merged.collocations:
             t = c["term"].strip()
             if t.lower() not in seen_col and t.lower() != low:
                 seen_col.add(t.lower())
-                colls_raw.append({"term": t, "example_en": c["example_en"]})
-
-        col_templates = [
-            "The situation required a {0} to succeed.",
-            "Everyone noticed the {0} right away.",
-            "Having a {0} made a significant difference.",
-        ]
-        for p in merged.collocation_terms:
-            if len(colls_raw) >= 3:
+                example = c["example_en"] or next(iter(ex["en"] for ex in LEXICON.examples(t, limit=1)), "")
+                colls_raw.append({"term": t, "example_en": example})
+            if len(colls_raw) >= 4:
                 break
-            if p.lower() not in seen_col:
-                seen_col.add(p.lower())
-                ex_c = col_templates[len(colls_raw) % len(col_templates)].format(p)
-                colls_raw.append({"term": p, "example_en": ex_c})
-        colls_raw = colls_raw[:3]
 
-    syns_words = [
-        w for w in dict.fromkeys(merged.syns)
-        if not is_spelling_or_root_duplicate(w, clean, root_lemma) and w.lower() not in WEAK_SYNONYMS
-    ][:3]
-    ants_words = [
-        w for w in dict.fromkeys(merged.ants)
-        if not is_spelling_or_root_duplicate(w, clean, root_lemma) and w.lower() not in WEAK_SYNONYMS
-    ][:3]
-
+    syn_items = _relation_items(merged.syns, clean, root_lemma, limit=6, per_sense=2)
+    ant_items = _relation_items(merged.ants, clean, root_lemma, limit=3, per_sense=3)
     with ThreadPoolExecutor(max_workers=6) as pool:
-        syn_ex_futs = {w: submit_in_context(pool, fetch_verified_example_for_relation, w, primary_pos) for w in syns_words}
-        ant_ex_futs = {w: submit_in_context(pool, fetch_verified_example_for_relation, w, primary_pos) for w in ants_words}
-        syns_raw = [{"term": w, "example_en": syn_ex_futs[w].result()} for w in syns_words]
-        ants_raw = [{"term": w, "example_en": ant_ex_futs[w].result()} for w in ants_words]
+        ex_futs = {it["term"]: submit_in_context(pool, fetch_verified_example_for_relation, it["term"], primary_pos)
+                   for it in syn_items + ant_items}
+        for it in syn_items + ant_items:
+            it["example_en"] = ex_futs[it["term"]].result()
+
+    derived = [d for d in dict.fromkeys(merged.derived) if d.lower() != low][:12] if not is_idiom_or_phrase else []
 
     core_idiom_meaning_en = ""
-    if is_idiom_or_phrase:
-        if low in OFFLINE_LEXICON.get("idioms", {}):
-            core_idiom_meaning_en = OFFLINE_LEXICON["idioms"][low]["meaning_en"]
-        elif selected_senses:
-            core_idiom_meaning_en = clean_definition_for_idiom_meaning(selected_senses[0]["def"])
+    if is_idiom_or_phrase and selected_senses:
+        core_idiom_meaning_en = clean_definition_for_idiom_meaning(selected_senses[0]["def"])
 
     sentences_to_tr: List[str] = []
     short_terms_to_tr: List[str] = []
-    sentence_sub_map: Dict[str, str] = {}
-
     if not fa_main:
-        if is_idiom_or_phrase and core_idiom_meaning_en:
-            short_terms_to_tr.append(core_idiom_meaning_en)
-        else:
-            short_terms_to_tr.append(clean)
-
+        short_terms_to_tr.append(core_idiom_meaning_en or clean)
     for s in selected_senses:
-        ex_orig = s["example_en"]
-        if ex_orig and not s.get("example_fa"):
-            if is_idiom_or_phrase and core_idiom_meaning_en:
-                s_meaning = clean_definition_for_idiom_meaning(s["def"]) or core_idiom_meaning_en
-                ex_sub = substitute_idiom_in_sentence(ex_orig, clean, s_meaning)
-                sentence_sub_map[ex_orig] = ex_sub
-                sentences_to_tr.append(ex_sub)
-            else:
-                sentence_sub_map[ex_orig] = ex_orig
-                sentences_to_tr.append(ex_orig)
-
-    for c in colls_raw:
-        short_terms_to_tr.append(c["term"])
-        if c["example_en"]:
-            sentences_to_tr.append(c["example_en"])
-    for syn in syns_raw:
-        short_terms_to_tr.append(syn["term"])
-        if syn["example_en"]:
-            sentences_to_tr.append(syn["example_en"])
-    for ant in ants_raw:
-        short_terms_to_tr.append(ant["term"])
-        if ant["example_en"]:
-            sentences_to_tr.append(ant["example_en"])
+        if s["example_en"] and not s.get("example_fa"):
+            sentences_to_tr.append(s["example_en"])
+    for item in colls_raw + syn_items + ant_items:
+        short_terms_to_tr.append(item["term"])
+        if item["example_en"]:
+            sentences_to_tr.append(item["example_en"])
 
     trans_map = translate_batch_fast(sentences_to_tr, short_terms_to_tr)
 
     if not fa_main or fa_main in INVALID_FA_HEADERS:
-        if is_idiom_or_phrase and core_idiom_meaning_en:
-            fa_main = trans_map.get(core_idiom_meaning_en, "")
-        else:
-            fa_main = trans_map.get(clean, "")
-
+        fa_main = trans_map.get(core_idiom_meaning_en or clean, "")
+        fa_source = ""  # whichever tier the batch used
     for s in selected_senses:
-        ex_orig = s["example_en"]
-        if ex_orig and not s.get("example_fa"):
-            if low in OFFLINE_LEXICON.get("idioms", {}) and ex_orig == OFFLINE_LEXICON["idioms"][low]["example"]:
-                s["example_fa"] = OFFLINE_LEXICON["idioms"][low]["example_fa"]
-            else:
-                sub_key = sentence_sub_map.get(ex_orig, ex_orig)
-                s["example_fa"] = trans_map.get(sub_key, "")
+        if s["example_en"] and not s.get("example_fa"):
+            s["example_fa"] = trans_map.get(s["example_en"], "")
+
+    def related(item: Dict[str, str]) -> Dict[str, str]:
+        ex = item["example_en"]
+        out = {
+            "term": item["term"],
+            "ipa": to_ipa_us(item["term"]),
+            "fa": trans_map.get(item["term"], ""),
+            "example_en": ex,
+            "example_ipa": sentence_to_ipa(ex) if ex else "",
+            "example_fa": trans_map.get(ex, "") if ex else "",
+        }
+        if "sense" in item:
+            out["sense"] = item["sense"]
+        return out
 
     return {
         "headword": clean,
@@ -1724,44 +1660,16 @@ def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
         "is_idiom": is_idiom_or_phrase,
         "did_you_mean": did_you_mean,
         "ipa_us": ipa_us,
-        "persian_equivalent": fa_main or "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f",
+        "persian_equivalent": fa_main if fa_main and fa_main not in INVALID_FA_HEADERS else NOT_FOUND_FA,
+        "persian_source": fa_source,
         "senses": selected_senses,
         "sentence_breakdown": [],
-        "collocations": [
-            {
-                "term": c["term"],
-                "ipa": to_ipa_us(c["term"]),
-                "fa": trans_map.get(c["term"], ""),
-                "example_en": c["example_en"],
-                "example_ipa": sentence_to_ipa(c["example_en"]),
-                "example_fa": trans_map.get(c["example_en"], ""),
-            }
-            for c in colls_raw
-        ],
+        "collocations": [related(c) for c in colls_raw],
+        "derived_terms": derived,
         "morphology": morphology,
         "cefr_level": lookup_cefr_level(clean),
         "frequency_per_million": merged.frequency,
         "frequency_band": word_levels.frequency_band(merged.frequency),
-        "synonyms": [
-            {
-                "term": syn["term"],
-                "ipa": to_ipa_us(syn["term"]),
-                "fa": trans_map.get(syn["term"], ""),
-                "example_en": syn["example_en"],
-                "example_ipa": sentence_to_ipa(syn["example_en"]) if syn["example_en"] else "",
-                "example_fa": trans_map.get(syn["example_en"], "") if syn["example_en"] else "",
-            }
-            for syn in syns_raw
-        ],
-        "antonyms": [
-            {
-                "term": ant["term"],
-                "ipa": to_ipa_us(ant["term"]),
-                "fa": trans_map.get(ant["term"], ""),
-                "example_en": ant["example_en"],
-                "example_ipa": sentence_to_ipa(ant["example_en"]) if ant["example_en"] else "",
-                "example_fa": trans_map.get(ant["example_en"], "") if ant["example_en"] else "",
-            }
-            for ant in ants_raw
-        ],
+        "synonyms": [related(it) for it in syn_items],
+        "antonyms": [related(it) for it in ant_items],
     }
