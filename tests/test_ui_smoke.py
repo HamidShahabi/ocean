@@ -73,7 +73,7 @@ class FakeWorker(QObject):
     finished_success = pyqtSignal(str, dict)
     finished_error = pyqtSignal(str)
 
-    def __init__(self, term, deep_mode=False):
+    def __init__(self, term):
         super().__init__()
         self.term = term
 
@@ -197,7 +197,6 @@ class UiSmokeTest(unittest.TestCase):
         self.win.right_drawer.settings_page.theme_drop.setCurrentText("Dark Mode")
         with mock.patch("ui.main_window.start_worker"):
             self.win._analyze_input(force_refresh=True)  # Refresh button
-            self.win._analyze_input(force_refresh=True, deep_mode=True)  # Deep search
         self.assertEqual(self._count("serendipity"), 2)
         self.win._analyze_input(override_term="break the ice")
         self.win._go_back()  # back/forward re-show an entry, they are not new lookups
@@ -1140,7 +1139,7 @@ class ReaderPageTest(unittest.TestCase):
         lexical_engine.set_offline_only(True)
         seen = []
 
-        def engine(term, deep_mode=False):  # stands in for the engine: the real one needs WordNet data
+        def engine(term):  # stands in for the engine: the real one needs WordNet data
             seen.append((term, lexical_engine.is_offline_only()))
             return dict(RUN, headword=term)
 

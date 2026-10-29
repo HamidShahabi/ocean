@@ -139,7 +139,7 @@ Ocean says one of your saved words out loud, with the voice chosen in Settings, 
 
 Sort by **Most Recent** or **Most Looked Up**. The search and the sort both combine with **Saved Favorites Only**.
 
-Each lookup you make (typing a word, picking a suggestion, clicking a history row or candidate, the Ctrl+Alt+O hotkey) adds one to that word's counter, shown as ×2, ×3… beside it. Existing history starts at 1. Refresh, Deep search, back/forward and re-showing a result do not count.
+Each lookup you make (typing a word, picking a suggestion, clicking a history row or candidate, the Ctrl+Alt+O hotkey) adds one to that word's counter, shown as ×2, ×3… beside it. Existing history starts at 1. Refresh, back/forward and re-showing a result do not count.
 
 ### Export to Anki
 

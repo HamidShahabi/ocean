@@ -116,9 +116,16 @@ class DisabledSourcesAreNeverContactedTest(unittest.TestCase):
         return {urlparse(u).netloc for u in self.urls}
 
     def lookup_all_kinds(self):
-        """A word, a deep search, an idiom and a misspelling (which asks for suggestions) reach every site."""
+        """A word, an idiom and a misspelling (which asks for suggestions) reach every site. Wiktionary only
+        fills in for a phrase TheFreeDictionary knows too little about, so one idiom is looked up without it."""
         results = [le.analyze_with_dictionaries(t) for t in ("bright", "break the ice", "brigt")]
-        return results + [le.analyze_with_dictionaries("bright", deep_mode=True)]
+        tfd_on = ds.REGISTRY.is_enabled("thefreedictionary")
+        ds.REGISTRY.set_enabled("thefreedictionary", False)
+        try:
+            results.append(le.analyze_with_dictionaries("break the ice"))
+        finally:
+            ds.REGISTRY.set_enabled("thefreedictionary", tfd_on)
+        return results
 
     def test_every_network_source_is_contacted_when_enabled(self):
         self.lookup_all_kinds()
@@ -150,7 +157,7 @@ class DisabledSourcesAreNeverContactedTest(unittest.TestCase):
         results = self.lookup_all_kinds()
         self.assertEqual(self.urls, [])
         self.assertEqual([r["senses"] for r in results], [[]] * 4)
-        self.assertEqual([r["headword"] for r in results], ["bright", "break the ice", "brigt", "bright"])
+        self.assertEqual([r["headword"] for r in results], ["bright", "break the ice", "brigt", "break the ice"])
 
     def test_only_one_source_left_on_is_the_only_one_contacted(self):
         for name in ds.REGISTRY.names():

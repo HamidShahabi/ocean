@@ -93,7 +93,6 @@ class MainWindow(QMainWindow):
         persian_owner: Optional[PersianTranslationWidget] = widget.property("persian_owner") if isinstance(widget, QLabel) else None
         if persian_owner is not None:
             options.append("Edit Persian Translation")
-            options.append("Auto-Fix Translation")
 
         if isinstance(widget, QLineEdit):
             if selected_txt:
@@ -115,8 +114,6 @@ class MainWindow(QMainWindow):
                 self._analyze_input(force_refresh=False, override_term=clean_sel)
             elif act == "Edit Persian Translation" and persian_owner:
                 persian_owner.trigger_manual_edit()
-            elif act == "Auto-Fix Translation" and persian_owner:
-                persian_owner.trigger_auto_fix()
             elif act == "Copy":
                 if isinstance(widget, QLineEdit):
                     widget.copy()
@@ -479,7 +476,7 @@ class MainWindow(QMainWindow):
         self.input_box.setText(text)
         self._analyze_input(force_refresh=False)
 
-    def _analyze_input(self, force_refresh: bool = False, override_term: Optional[str] = None, deep_mode: bool = False) -> None:
+    def _analyze_input(self, force_refresh: bool = False, override_term: Optional[str] = None) -> None:
         self.sug_popup.hide()
         if override_term:
             self.input_box.setText(override_term)
@@ -496,11 +493,11 @@ class MainWindow(QMainWindow):
 
         self._switch_to_results_view()
 
-        if not force_refresh and not deep_mode and not self._navigating_history:
+        if not force_refresh and not self._navigating_history:
             # A user-initiated lookup (cached or fresh) counts once; refreshes and back/forward do not.
             self.db.record_lookup(term)
         self._stale_copy = None
-        if not force_refresh and not deep_mode:
+        if not force_refresh:
             cached = self.db.get_entry(term)
             if cached and (cached.get("senses") or cached.get("is_sentence")):
                 if self._should_refresh(cached):
@@ -516,14 +513,12 @@ class MainWindow(QMainWindow):
                 return
 
         self.explore_btn.setEnabled(False)
-        if deep_mode:
-            self.status_label.setText(f"Deep searching '{term}'...")
-        elif self._stale_copy is not None:
+        if self._stale_copy is not None:
             self.status_label.setText(f"Refreshing '{term}'...")
         else:
             self.status_label.setText(f"Analyzing '{term}'...")
 
-        self.worker = EngineWorker(term, deep_mode=deep_mode)
+        self.worker = EngineWorker(term)
         self.worker.finished_success.connect(self._on_inference_success)
         self.worker.finished_error.connect(self._on_inference_error)
         start_worker(self.worker)

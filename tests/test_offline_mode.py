@@ -132,10 +132,6 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
             self.assertTrue(data["senses"])  # WordNet still answers
         self.assert_silent()
 
-    def test_deep_word_lookup(self):
-        le.analyze_with_dictionaries("serendipity", deep_mode=True)
-        self.assert_silent()
-
     def test_bundled_idiom_lookup(self):
         data = le.analyze_with_dictionaries("spill the beans")
         self.assertTrue(data["is_idiom"])
@@ -191,8 +187,6 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
         le.fetch_persian_word_meaning("zeitgeist")
         le.fetch_persian_word_meaning("under the weather", is_idiom=True)
         le.translate_batch_fast(["The cat sat on the mat today."], ["cat", "zeitgeist"])
-        with mock.patch.object(le, "record_user_override"):
-            le.auto_fix_translation_deep("zeitgeist")
         self.assert_silent()
 
     def test_only_local_sources_are_active(self):

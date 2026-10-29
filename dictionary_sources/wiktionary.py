@@ -14,7 +14,7 @@ class WiktionarySource(DictionarySource):
     needs = ("offline_idioms", "thefreedictionary")
 
     def applies(self, ctx: LookupContext) -> bool:
-        return ctx.is_idiom or ctx.deep_mode
+        return ctx.is_idiom
 
     def fetch(self, ctx: LookupContext, entry: PartialEntry, prior: PartialEntry) -> None:
         if len(prior.senses) >= 2:

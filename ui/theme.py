@@ -1,8 +1,9 @@
 """Fonts, vector icons, the colour palette and the Qt style sheet (light and dark)."""
 import sys
 import os
+import struct
 
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QBuffer, QIODevice, QRectF
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -631,3 +632,16 @@ def apply_theme(settings_data: dict) -> str:
         }}
         """
     return qss
+
+
+def write_app_icon_ico(ico_path: str) -> None:
+    """Write the app icon as a single-image .ico (the Windows build embeds it in Ocean.exe)."""
+    pixmap = VectorIcons.ocean_app_icon().pixmap(256, 256)
+    ba = QBuffer()
+    ba.open(QIODevice.OpenModeFlag.WriteOnly)
+    pixmap.save(ba, "PNG")
+    png_bytes = bytes(ba.data())
+    header = struct.pack("<HHH", 0, 1, 1)
+    entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png_bytes), 22)
+    with open(ico_path, "wb") as f:
+        f.write(header + entry + png_bytes)

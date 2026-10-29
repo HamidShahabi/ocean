@@ -147,8 +147,8 @@ class ReaderResultPanel(QWidget):
         vbox.addWidget(self.results, stretch=1)
 
     # --- what ResultsPage expects of its main window ---
-    def _analyze_input(self, force_refresh: bool = False, override_term: Optional[str] = None, deep_mode: bool = False) -> None:
-        self.page.lookup(override_term or self.current_term or "", force_refresh=force_refresh, deep_mode=deep_mode)
+    def _analyze_input(self, force_refresh: bool = False, override_term: Optional[str] = None) -> None:
+        self.page.lookup(override_term or self.current_term or "", force_refresh=force_refresh)
 
     def refresh_review_badges(self) -> None:
         self.main_win.refresh_review_badges()
@@ -524,7 +524,7 @@ class ReaderPage(QWidget):
             return  # the same word again (e.g. a double-click): already shown or on its way
         self.lookup(term, note=note, save_after=term if save else None)
 
-    def lookup(self, term: str, force_refresh: bool = False, deep_mode: bool = False,
+    def lookup(self, term: str, force_refresh: bool = False,
                save_after: Optional[str] = None, record: bool = True, note: str = "") -> None:
         """Show the entry for `term` in the panel: from the saved copy when there is one, else fetched on a
         worker thread (offline-only mode uses local data only, the engine takes care of that)."""
@@ -536,7 +536,7 @@ class ReaderPage(QWidget):
         self.save_after = save_after
         self._stale_copy = None
         self._note = note
-        if not force_refresh and not deep_mode:
+        if not force_refresh:
             if record:
                 db.record_lookup(term)  # a lookup you asked for counts, like one from the search box
             cached = db.get_entry(term)
@@ -548,7 +548,7 @@ class ReaderPage(QWidget):
                     self._show(term, cached)
                     return
         self.panel.show_message(f"Looking up '{term}'...")
-        self.worker = EngineWorker(term, deep_mode=deep_mode)
+        self.worker = EngineWorker(term)
         self.worker.finished_success.connect(self._on_success)
         self.worker.finished_error.connect(self._on_error)
         start_worker(self.worker)

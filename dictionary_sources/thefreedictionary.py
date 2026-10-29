@@ -7,12 +7,12 @@ from .base import DictionarySource, LookupContext, PartialEntry
 
 
 class TheFreeDictionarySource(DictionarySource):
-    """Idioms section of thefreedictionary.com: only asked about phrases (or in deep mode)."""
+    """Idioms section of thefreedictionary.com: only asked about phrases."""
     name = "thefreedictionary"
     label = "TheFreeDictionary (idioms)"
 
     def applies(self, ctx: LookupContext) -> bool:
-        return ctx.is_idiom or ctx.deep_mode
+        return ctx.is_idiom
 
     def fetch(self, ctx: LookupContext, entry: PartialEntry, prior: PartialEntry) -> None:
         slug = "+".join(ctx.term.strip().lower().split())

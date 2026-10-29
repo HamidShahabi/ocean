@@ -317,8 +317,6 @@ class RegistryRunTest(unittest.TestCase):
         names = [s.name for s in ds.REGISTRY.active(ctx_for("bright"))]
         self.assertNotIn("thefreedictionary", names)
         self.assertNotIn("wiktionary", names)
-        names = [s.name for s in ds.REGISTRY.active(ctx_for("bright", deep_mode=True))]
-        self.assertIn("thefreedictionary", names)
 
     def test_wiktionary_only_fills_in_when_there_are_fewer_than_two_senses(self):
         ctx = ctx_for("break the ice", is_idiom=True)

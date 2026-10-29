@@ -1118,34 +1118,6 @@ def fetch_persian_word_meaning(term: str, is_idiom: bool = False) -> str:
     return translate_single_string(clean, is_short=not is_idiom)
 
 
-def auto_fix_translation_deep(en_text: str) -> str:
-    clean = en_text.strip()
-    if not clean:
-        return ""
-
-    c5 = translate_via_clients5(clean, is_short=False)
-    if c5 and "..." not in c5 and "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" not in c5:
-        record_user_override(clean, c5)
-        return c5
-
-    gtx = translate_single_string(clean, is_short=False)
-    if gtx and "..." not in gtx and "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" not in gtx:
-        record_user_override(clean, gtx)
-        return gtx
-
-    words = clean.split()
-    if len(words) <= 3 and wn:
-        syns = wn.synsets("_".join(words))
-        if syns:
-            gloss = syns[0].definition().split(";")[0].strip()
-            tr_gloss = translate_via_clients5(gloss, is_short=False) or translate_single_string(gloss, is_short=False)
-            if tr_gloss and "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" not in tr_gloss:
-                record_user_override(clean, tr_gloss)
-                return tr_gloss
-
-    return "\u062a\u0631\u062c\u0645\u0647 \u06cc\u0627\u0641\u062a \u0646\u0634\u062f"
-
-
 def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[str, str]:
     all_items = [x.strip() for x in dict.fromkeys(sentences + short_terms) if x and x.strip()]
     if not all_items:
@@ -1493,12 +1465,12 @@ def lookup_cefr_level(term: str) -> str:
     return word_levels.cefr_level(CEFR_LEVELS_FILE, term, lemmas) or ""
 
 
-def analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, Any]:
+def analyze_with_dictionaries(term: str) -> Dict[str, Any]:
     with lookup_request_cache():  # identical requests within this one lookup reach the network once
-        return _analyze_with_dictionaries(term, deep_mode)
+        return _analyze_with_dictionaries(term)
 
 
-def _analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, Any]:
+def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
     raw_input = term.strip()
     if is_persian_text(raw_input):
         return analyze_persian(raw_input)
@@ -1545,7 +1517,7 @@ def _analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, 
 
     sources = _dictionary_sources()
     ctx = sources.LookupContext(
-        term=clean, is_idiom=is_idiom_or_phrase, deep_mode=deep_mode, root_lemma=root_lemma, offline=_OFFLINE_ONLY
+        term=clean, is_idiom=is_idiom_or_phrase, root_lemma=root_lemma, offline=_OFFLINE_ONLY
     )
     with ThreadPoolExecutor(max_workers=1) as pool:
         f_fa = submit_in_context(pool, fetch_persian_word_meaning, clean, is_idiom_or_phrase)
@@ -1713,9 +1685,7 @@ def _analyze_with_dictionaries(term: str, deep_mode: bool = False) -> Dict[str, 
     trans_map = translate_batch_fast(sentences_to_tr, short_terms_to_tr)
 
     if not fa_main or fa_main in INVALID_FA_HEADERS:
-        if deep_mode:
-            fa_main = auto_fix_translation_deep(clean)
-        elif is_idiom_or_phrase and core_idiom_meaning_en:
+        if is_idiom_or_phrase and core_idiom_meaning_en:
             fa_main = trans_map.get(core_idiom_meaning_en, "")
         else:
             fa_main = trans_map.get(clean, "")

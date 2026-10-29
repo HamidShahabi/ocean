@@ -9,7 +9,7 @@ class OfflineIdiomsSource(DictionarySource):
     needs_network = False
 
     def applies(self, ctx: LookupContext) -> bool:
-        return ctx.is_idiom or ctx.deep_mode
+        return ctx.is_idiom
 
     def fetch(self, ctx: LookupContext, entry: PartialEntry, prior: PartialEntry) -> None:
         idiom = le.OFFLINE_LEXICON.get("idioms", {}).get(ctx.term.strip().lower())
@@ -29,7 +29,7 @@ class IdiomFallbackSource(DictionarySource):
     needs = ("offline_idioms", "thefreedictionary", "wiktionary")
 
     def applies(self, ctx: LookupContext) -> bool:
-        return ctx.is_idiom or ctx.deep_mode
+        return ctx.is_idiom
 
     def fetch(self, ctx: LookupContext, entry: PartialEntry, prior: PartialEntry) -> None:
         low = ctx.term.strip().lower()

@@ -84,8 +84,8 @@ class HistoryStore:
 
     What counts as a lookup: a user-initiated one (typing a term, picking a suggestion, clicking a
     history row, candidate or related word, the global hotkey), whether it was fetched fresh or served
-    from this store's cache. Re-rendering an entry, toggling its star, refreshing it, deep-searching it
-    again and back/forward navigation are not lookups. The UI calls record_lookup() for each lookup;
+    from this store's cache. Re-rendering an entry, toggling its star, refreshing it
+    and back/forward navigation are not lookups. The UI calls record_lookup() for each lookup;
     save_entry() never touches the counter, so storing a fresh or refreshed result cannot inflate it.
     """
 

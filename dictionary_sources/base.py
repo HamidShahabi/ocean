@@ -12,7 +12,6 @@ class LookupContext:
     """What a source needs to know about the lookup it is part of."""
     term: str
     is_idiom: bool = False        # multi-word phrase
-    deep_mode: bool = False
     root_lemma: str = ""
     offline: bool = False         # when set, sources that need the network are skipped
     requester: Optional[Callable[..., Any]] = None  # replaces smart_request (tests); the per-lookup cache lives in smart_request

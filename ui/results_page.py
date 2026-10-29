@@ -333,18 +333,9 @@ class ResultsPage(QWidget):
         if not is_sentence and not senses and not dictionary_sources.REGISTRY.any_enabled():
             self._add_all_sources_off_notice()
 
-        # --- SECTION 1: Overview & Definitions (No Emoji on Deep Search!) ---
+        # --- SECTION 1: Overview & Definitions ---
         card1_title = "1. Sentence Analysis & Translation" if is_sentence else "1. Overview & Definitions"
         card1, vbox1, header1 = self._create_glass_card(card1_title)
-
-        deep_btn = QPushButton("Deep Search")
-        deep_btn.setObjectName("GlassPillButton")
-        deep_btn.setFixedHeight(34)
-        deep_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        deep_btn.setToolTip("Run multi-source deep search for this entry")
-        deep_btn.clicked.connect(lambda: self.main_win._analyze_input(force_refresh=True, deep_mode=True))
-        header1.addWidget(deep_btn)
-
 
         ref_btn = QPushButton("Refresh")
         ref_btn.setObjectName("GlassPillButton")

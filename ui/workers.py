@@ -59,27 +59,14 @@ class EngineWorker(QThread):
     finished_success = pyqtSignal(str, dict)
     finished_error = pyqtSignal(str)
 
-    def __init__(self, term: str, deep_mode: bool = False) -> None:
+    def __init__(self, term: str) -> None:
         super().__init__()
         self.term = term
-        self.deep_mode = deep_mode
 
     def run(self) -> None:
         try:
-            res = lexical_engine.analyze_with_dictionaries(self.term, deep_mode=self.deep_mode)
+            res = lexical_engine.analyze_with_dictionaries(self.term)
             self.finished_success.emit(res.get("headword", self.term), res)
         except Exception as exc:
             log.exception("Lookup failed for %r", self.term)
             self.finished_error.emit(str(exc))
-
-
-class AutoFixWorker(QThread):
-    fixed_ready = pyqtSignal(str)
-
-    def __init__(self, en_source: str) -> None:
-        super().__init__()
-        self.en_source = en_source
-
-    def run(self) -> None:
-        res = lexical_engine.auto_fix_translation_deep(self.en_source)
-        self.fixed_ready.emit(res)
