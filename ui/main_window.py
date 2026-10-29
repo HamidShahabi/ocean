@@ -531,6 +531,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Analyzing '{term}'...")
 
         self.worker = EngineWorker(term)
+        self.worker.preview_ready.connect(self._on_preview)
         self.worker.finished_success.connect(self._on_inference_success)
         self.worker.finished_error.connect(self._on_inference_error)
         start_worker(self.worker)
@@ -550,6 +551,17 @@ class MainWindow(QMainWindow):
         self.current_data = stale
         self.results_page.render(term, stale)
         self.status_label.setText(note)
+
+    def _on_preview(self, term: str, data: Dict[str, Any]) -> None:
+        """Show what the local data says straight away; the full entry replaces it when its Persian is ready
+        (or, for a refresh that fails, the saved copy does)."""
+        if self.sender() is not self.worker:
+            return
+        lexical_engine.apply_user_overrides(data)
+        self.current_term = term
+        self.current_data = None  # nothing to edit or save until the full entry arrives
+        self.results_page.render(term, data)
+        self.status_label.setText(f"Translating '{term}'...")
 
     def _on_inference_success(self, term: str, data: Dict[str, Any]) -> None:
         if self.sender() is not self.worker:

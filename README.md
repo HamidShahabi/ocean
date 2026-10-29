@@ -257,7 +257,7 @@ Words listed at several levels (one per part of speech) show their lowest. `tool
 
 ## Development
 
-Run the tests (they build a small sample database of their own and never read `ocean_lexicon.db`):
+Run the tests (the lookup tests build a small sample database of their own instead of using `ocean_lexicon.db`):
 
 ```bash
 .venv/bin/python -m unittest discover -s tests

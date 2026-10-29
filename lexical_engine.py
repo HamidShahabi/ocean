@@ -10,10 +10,11 @@ import sqlite3
 import threading
 import contextvars
 from collections import OrderedDict
+from functools import lru_cache
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -224,17 +225,32 @@ def _load_ct2_model() -> None:
         _SP_PROCESSOR, _CT2_TRANSLATOR = sp_proc, translator
 
 
+_WORDNET_LOCK = threading.Lock()
+_WORDNET_READY = False
+
+
+def ensure_wordnet() -> None:
+    """Load WordNet once, before any lookup reads it: NLTK's lazy corpus loaders are not safe to load from
+    two threads at once, and the preload races the first lookup (a --lookup start). Later calls return at once."""
+    global _WORDNET_READY
+    if _WORDNET_READY or not hasattr(wn, "ensure_loaded"):  # None, or a stand-in (tests)
+        return
+    with _WORDNET_LOCK:
+        if _WORDNET_READY:
+            return
+        try:
+            from nltk.corpus import wordnet as wordnet30  # the lemmatizer's, and what WordNet 3.1 maps onto
+            wordnet30.ensure_loaded()
+            wn.ensure_loaded()
+        except Exception:
+            log.exception("Could not load WordNet")
+        _WORDNET_READY = True  # loaded, or failed for good: lookups log their own WordNet errors
+
+
 def preload_wordnet() -> threading.Thread:
     """Read WordNet in the background: WordNet 3.1 takes a few seconds to load, which would otherwise
     delay the first lookup."""
-    def run() -> None:
-        try:
-            if wn is not None:
-                wn.ensure_loaded()
-        except Exception:
-            log.exception("Could not preload WordNet")
-
-    thread = threading.Thread(target=run, name="wordnet-preload", daemon=True)
+    thread = threading.Thread(target=ensure_wordnet, name="wordnet-preload", daemon=True)
     thread.start()
     return thread
 
@@ -781,6 +797,18 @@ def fallback_word_g2p(word: str) -> str:
     return out
 
 
+@lru_cache(maxsize=50_000)
+def _cmu_ipa(word: str) -> str:
+    """eng_to_ipa's CMU transcription, "" if unknown. Cached: each call opens its database (~10 ms)."""
+    if not ipa_engine:
+        return ""
+    try:
+        res = ipa_engine.convert(word)
+        return res if res and "*" not in res else ""
+    except Exception:
+        return ""
+
+
 def convert_token_to_ipa(token: str) -> str:
     norm_tok = re.sub(r"[\u2018\u2019\u02bc]", "'", token)
     clean = re.sub(r"[^a-zA-Z\-']", "", norm_tok).strip("-'")
@@ -800,13 +828,9 @@ def convert_token_to_ipa(token: str) -> str:
     if "-" in low:
         parts = [convert_token_to_ipa(p) for p in low.split("-") if p]
         return "-".join(p for p in parts if p)
-    if ipa_engine:
-        try:
-            res = ipa_engine.convert(low)
-            if res and "*" not in res:
-                return res
-        except Exception:
-            pass
+    res = _cmu_ipa(low)
+    if res:
+        return res
     known = LEXICON.ipa(low)  # Wiktionary covers many words the CMU-based engine doesn't
     if known:
         return known.strip("/").split(",")[0].strip()
@@ -1444,9 +1468,16 @@ def lookup_cefr_level(term: str) -> str:
     return word_levels.cefr_level(CEFR_LEVELS_FILE, term, lemmas) or ""
 
 
-def analyze_with_dictionaries(term: str) -> Dict[str, Any]:
+PENDING_FA = "\u2026"  # "…": in a preview, Persian that is still being translated
+
+
+def analyze_with_dictionaries(term: str, on_preview: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
+    """The entry for a word, phrase or sentence (English or Persian). For a word or phrase, on_preview gets the
+    entry built from local data alone (definitions, examples, IPA, the local Persian) as soon as the sources
+    have answered, with PENDING_FA where Persian is still to come; the full entry is returned afterwards."""
+    ensure_wordnet()  # waits for a preload in progress instead of loading WordNet a second time
     with lookup_request_cache():  # identical requests within this one lookup reach the network once
-        return _analyze_with_dictionaries(term)
+        return _analyze_with_dictionaries(term, on_preview)
 
 
 def _empty_morphology(term: str) -> Dict[str, Any]:
@@ -1494,14 +1525,13 @@ def _analyze_sentence(clean: str) -> Dict[str, Any]:
     }
 
 
-def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
+def _analyze_with_dictionaries(term: str, on_preview: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     raw_input = term.strip()
     if is_persian_text(raw_input):
         return analyze_persian(raw_input)
     words = raw_input.split()
     is_full_sentence = len(words) >= 5 or (len(words) >= 4 and raw_input.endswith((".", "!", "?")))
     clean = auto_correct_english_input(raw_input, is_sentence=is_full_sentence)
-    low = clean.lower()
     if is_full_sentence:
         return _analyze_sentence(clean)
 
@@ -1512,10 +1542,18 @@ def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
 
     sources = _dictionary_sources()
     ctx = sources.LookupContext(term=clean, is_idiom=is_idiom_or_phrase, root_lemma=root_lemma)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        f_fa = submit_in_context(pool, fetch_persian_word_meaning, clean, is_idiom_or_phrase)
+    fa_pool = ThreadPoolExecutor(max_workers=1)  # the headword's Persian, possibly slow (Google, the models)
+    try:
+        f_fa = submit_in_context(fa_pool, fetch_persian_word_meaning, clean, is_idiom_or_phrase)
         merged = sources.REGISTRY.run(ctx)  # every enabled dictionary source, merged in registry order
-        fa_main, fa_source = f_fa.result()
+        return _build_word_entry(clean, words, is_idiom_or_phrase, morphology, root_lemma, merged, f_fa, on_preview)
+    finally:
+        fa_pool.shutdown(wait=False)
+
+
+def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, morphology: Dict[str, Any], root_lemma: str,
+                      merged: Any, f_fa: Any, on_preview: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
+    low = clean.lower()
 
     did_you_mean = ""
     if not merged.senses and len(words) == 1:
@@ -1567,7 +1605,7 @@ def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
             "pos": "Idiom / Expression" if is_idiom_or_phrase and s.get("pos") != "Slang" else s.get("pos", "Noun"),
             "def": d_txt,
             "example_en": ex_en,
-            "example_ipa": sentence_to_ipa(ex_en) if ex_en else "",
+            "example_ipa": "",  # filled in by entry()
             "example_fa": ex_fa,
         })
         if len(selected_senses) >= 3:
@@ -1586,7 +1624,7 @@ def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
                 "pos": s_pos,
                 "def": s["def"],
                 "example_en": ex_en,
-                "example_ipa": sentence_to_ipa(ex_en) if ex_en else "",
+                "example_ipa": "",
                 "example_fa": ex_fa,
             })
             existing_pos.add(s_pos)
@@ -1619,6 +1657,59 @@ def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
     if is_idiom_or_phrase and selected_senses:
         core_idiom_meaning_en = clean_definition_for_idiom_meaning(selected_senses[0]["def"])
 
+    def entry(fa_main: str, fa_source: str, trans_map: Dict[str, str], pending: str = "") -> Dict[str, Any]:
+        def fa(en: str) -> str:
+            return trans_map.get(en, "") or pending
+
+        def related(item: Dict[str, str]) -> Dict[str, str]:
+            ex = item["example_en"]
+            out = {
+                "term": item["term"],
+                "ipa": to_ipa_us(item["term"]),
+                "fa": fa(item["term"]),
+                "example_en": ex,
+                "example_ipa": (pending or sentence_to_ipa(ex)) if ex else "",
+                "example_fa": fa(ex) if ex else "",
+            }
+            if "sense" in item:
+                out["sense"] = item["sense"]
+            return out
+
+        return {
+            "headword": clean,
+            "is_sentence": False,
+            "is_idiom": is_idiom_or_phrase,
+            "did_you_mean": did_you_mean,
+            "ipa_us": ipa_us,
+            "persian_equivalent": fa_main if fa_main and fa_main not in INVALID_FA_HEADERS else (pending or NOT_FOUND_FA),
+            "persian_source": fa_source,
+            "senses": [dict(s, example_fa=s.get("example_fa") or (fa(s["example_en"]) if s["example_en"] else ""),
+                            example_ipa=(pending or sentence_to_ipa(s["example_en"])) if s["example_en"] else "")
+                       for s in selected_senses],
+            "sentence_breakdown": [],
+            "collocations": [related(c) for c in colls_raw],
+            "derived_terms": derived,
+            "morphology": morphology,
+            "cefr_level": lookup_cefr_level(clean),
+            "frequency_per_million": merged.frequency,
+            "frequency_band": word_levels.frequency_band(merged.frequency),
+            "synonyms": [related(it) for it in syn_items],
+            "antonyms": [related(it) for it in ant_items],
+        }
+
+    if on_preview is not None:
+        if f_fa.done():
+            fa_now, source_now = f_fa.result()
+        else:  # your edits and the local tier answer in milliseconds; the rest is still being asked
+            fa_now = USER_MEMORY.get("overrides", {}).get(low) or USER_MEMORY.get("entries", {}).get(low, {}).get("fa", "")
+            source_now = FA_SOURCE_EDIT if fa_now else ""
+            if not fa_now:
+                fa_now, source_now = local_translation(clean, is_short=not is_idiom_or_phrase)
+        preview = entry(fa_now, source_now, {tp["en"]: tp["fa"] for tp in merged.examples}, pending=PENDING_FA)
+        preview["_preview"] = True
+        on_preview(preview)
+
+    fa_main, fa_source = f_fa.result()
     sentences_to_tr: List[str] = []
     short_terms_to_tr: List[str] = []
     if not fa_main:
@@ -1640,36 +1731,4 @@ def _analyze_with_dictionaries(term: str) -> Dict[str, Any]:
         if s["example_en"] and not s.get("example_fa"):
             s["example_fa"] = trans_map.get(s["example_en"], "")
 
-    def related(item: Dict[str, str]) -> Dict[str, str]:
-        ex = item["example_en"]
-        out = {
-            "term": item["term"],
-            "ipa": to_ipa_us(item["term"]),
-            "fa": trans_map.get(item["term"], ""),
-            "example_en": ex,
-            "example_ipa": sentence_to_ipa(ex) if ex else "",
-            "example_fa": trans_map.get(ex, "") if ex else "",
-        }
-        if "sense" in item:
-            out["sense"] = item["sense"]
-        return out
-
-    return {
-        "headword": clean,
-        "is_sentence": False,
-        "is_idiom": is_idiom_or_phrase,
-        "did_you_mean": did_you_mean,
-        "ipa_us": ipa_us,
-        "persian_equivalent": fa_main if fa_main and fa_main not in INVALID_FA_HEADERS else NOT_FOUND_FA,
-        "persian_source": fa_source,
-        "senses": selected_senses,
-        "sentence_breakdown": [],
-        "collocations": [related(c) for c in colls_raw],
-        "derived_terms": derived,
-        "morphology": morphology,
-        "cefr_level": lookup_cefr_level(clean),
-        "frequency_per_million": merged.frequency,
-        "frequency_band": word_levels.frequency_band(merged.frequency),
-        "synonyms": [related(it) for it in syn_items],
-        "antonyms": [related(it) for it in ant_items],
-    }
+    return entry(fa_main, fa_source, trans_map)

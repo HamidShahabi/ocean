@@ -27,6 +27,10 @@ jobs:
           # setup_windows.ps1 installs the exact versions pinned in requirements.lock (incl. PyInstaller)
           ./setup_windows.ps1
 
+      - name: Check the dictionary database
+        run: |
+          .venv\Scripts\python.exe -c "import lexicon_db as L; db = L.LexiconDB('ocean_lexicon.db'); assert db.entries('bank'), 'no Kaikki entries'; assert db.translation_pair('I love you')[0], 'no corpus pairs'; assert db.close_matches('brigt') == ['bright'], 'no trigram index'"
+
       - name: Unit tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -56,6 +60,7 @@ jobs:
           Get-Content $log
           if (-not (Select-String -Path $log -Pattern "External lookup" -Quiet)) { throw "Running window never received the hand-off" }
           if (Select-String -Path $log -Pattern "Could not register" -Quiet) { throw "Ctrl+Alt+O hotkey registration failed" }
+          if (Select-String -Path $log -Pattern "lexicon database" -Quiet) { throw "The built app could not open ocean_lexicon.db" }
           Stop-Process -Id $app.Id
 
       - name: Package

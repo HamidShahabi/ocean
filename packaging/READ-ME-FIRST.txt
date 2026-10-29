@@ -21,6 +21,17 @@ USE
 Works offline: the dictionary is on your computer. Without internet, Persian
 the dictionary doesn't have comes from an offline translator (lower quality).
 
+CREDITS
+  The dictionary file ocean_lexicon.db contains:
+  - Wiktionary content via Kaikki.org (CC BY-SA 4.0 / GFDL; so this file is
+    shared under CC BY-SA 4.0 too)
+  - Tatoeba sentences (CC BY 2.0 FR, the Tatoeba contributors)
+  - OpenSubtitles via OPUS (P. Lison and J. Tiedemann, OpenSubtitles2016,
+    LREC 2016; J. Tiedemann, OPUS, LREC 2012; www.opensubtitles.org)
+  WordNet 3.1 (nltk_data) is (c) Princeton University, WordNet License.
+  CEFR levels: CEFR-J Wordlist 1.5 (Tono Laboratory, TUFS) and Octanove
+  Vocabulary Profile C1/C2 (CC BY-SA 4.0).
+
 YOUR DATA
   History, saved words and settings are kept in %APPDATA%\Ocean, so you can
   replace this folder with a newer version without losing anything.

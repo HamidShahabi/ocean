@@ -240,6 +240,29 @@ class EngineIntegrationTest(unittest.TestCase):
         self.assertEqual(len(syns), 5)  # at most two per sense (river 2, money 2, verb 1)
         self.assertEqual([a["term"] for a in d["antonyms"]], ["withdraw"])
 
+    def test_a_preview_from_local_data_comes_before_the_translations(self):
+        order, previews = [], []
+
+        def batch(sentences, shorts):
+            order.append("batch")
+            return {s: "ترجمه" for s in list(sentences) + list(shorts)}
+
+        with mock.patch.object(le, "translate_batch_fast", side_effect=batch):
+            d = le.analyze_with_dictionaries("bank", on_preview=lambda p: (order.append("preview"), previews.append(p)))
+        self.assertEqual(order, ["preview", "batch"])
+        p = previews[0]
+        self.assertTrue(p["_preview"])
+        self.assertEqual(p["persian_equivalent"], "بانک \u060c ساحل")  # the local tier, already
+        self.assertEqual(p["senses"][0]["example_fa"], le.PENDING_FA)  # Wiktionary's example: still to translate
+        self.assertEqual(p["senses"][1]["example_fa"], "من دارم به بانک می روم.")  # a corpus pair: already known
+        self.assertEqual(p["synonyms"][0]["fa"], le.PENDING_FA)
+        self.assertNotIn("_preview", d)
+        self.assertEqual((d["synonyms"][0]["fa"], d["senses"][0]["example_fa"]), ("ترجمه", "ترجمه"))
+
+    def test_no_preview_for_a_sentence(self):
+        with mock.patch.object(le, "extract_sentence_key_terms", return_value=[]):
+            le.analyze_with_dictionaries("We went to the bank this morning.", on_preview=self.fail)
+
     def test_examples_are_never_made_up(self):
         d = le.analyze_with_dictionaries("heavy")  # Wiktionary gives no example and no corpus sentence has the word
         self.assertEqual(d["senses"][0]["example_en"], "")

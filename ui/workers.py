@@ -56,6 +56,7 @@ class SuggestionWorker(QThread):
 
 
 class EngineWorker(QThread):
+    preview_ready = pyqtSignal(str, dict)  # the entry from local data, before the slower translations
     finished_success = pyqtSignal(str, dict)
     finished_error = pyqtSignal(str)
 
@@ -65,7 +66,8 @@ class EngineWorker(QThread):
 
     def run(self) -> None:
         try:
-            res = lexical_engine.analyze_with_dictionaries(self.term)
+            res = lexical_engine.analyze_with_dictionaries(
+                self.term, on_preview=lambda d: self.preview_ready.emit(d.get("headword", self.term), d))
             self.finished_success.emit(res.get("headword", self.term), res)
         except Exception as exc:
             log.exception("Lookup failed for %r", self.term)

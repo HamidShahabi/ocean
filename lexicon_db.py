@@ -12,6 +12,7 @@ empty result when the database is missing or broken: lookups then work from the 
 import json
 import logging
 import os
+import pathlib
 import re
 import sqlite3
 import threading
@@ -62,7 +63,7 @@ class LexiconDB:
                     log.info("Lexicon database %s not found: run tools/build_lexicon_db.py (the setup scripts do)", self.path)
                     return None
                 try:
-                    uri = "file:" + os.path.abspath(self.path).replace("?", "%3f").replace("#", "%23") + "?mode=ro"
+                    uri = pathlib.Path(self.path).resolve().as_uri() + "?mode=ro"  # file:///C:/... on Windows, escaped
                     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
                     self._tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")}
                     self._conn = conn

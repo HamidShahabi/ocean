@@ -73,6 +73,7 @@ IDIOM = {
 
 class FakeWorker(QObject):
     """Stands in for EngineWorker so a lookup never touches the network."""
+    preview_ready = pyqtSignal(str, dict)
     finished_success = pyqtSignal(str, dict)
     finished_error = pyqtSignal(str)
 
@@ -790,6 +791,29 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(saved["_engine_version"], lexical_engine.ENGINE_VERSION)
         self.assertEqual(self.win.current_data["persian_equivalent"], "شانس خوب")
 
+    def test_a_preview_shows_first_and_the_full_entry_replaces_it(self):
+        with mock.patch("ui.main_window.EngineWorker", FakeWorker), mock.patch("ui.main_window.start_worker"):
+            self.win._analyze_input(override_term="zeitgeist")
+        worker = self.win.worker
+        preview = dict(WORD, headword="zeitgeist", persian_equivalent=lexical_engine.PENDING_FA, _preview=True)
+        worker.preview_ready.emit("zeitgeist", preview)
+        self.assertIn("Finding something good by chance.", " ".join(card_texts(self.win)))
+        self.assertIn("Translating", self.win.status_label.text())
+        self.assertIsNone(self.win.current_data)  # nothing to edit or save yet
+        self.assertIsNone(self.win.db.get_entry("zeitgeist"))
+        worker.finished_success.emit("zeitgeist", dict(WORD, headword="zeitgeist", persian_equivalent="روح زمانه"))
+        self.assertEqual(self.win.current_data["persian_equivalent"], "روح زمانه")
+        self.assertEqual(self.win.status_label.text(), "")
+        self.win.db.delete_entry("zeitgeist")
+
+    def test_a_refresh_that_fails_after_its_preview_shows_the_saved_copy(self):
+        worker = self._lookup_stale()
+        worker.preview_ready.emit("serendipity", dict(WORD, senses=[{"pos": "Noun", "def": "A preview sense."}], _preview=True))
+        self.assertIn("A preview sense.", " ".join(card_texts(self.win)))
+        worker.finished_error.emit("no network")
+        self.assertIn("Finding something good by chance.", " ".join(card_texts(self.win)))  # the saved copy is back
+        self.assertEqual(self.win.current_data["persian_equivalent"], WORD["persian_equivalent"])
+
     def test_stale_entry_is_shown_when_the_refetch_fails_or_is_empty(self):
         for outcome in ("error", "empty"):
             worker = self._lookup_stale()
@@ -1200,7 +1224,7 @@ class ReaderPageTest(unittest.TestCase):
         lexical_engine.set_offline_only(True)
         seen = []
 
-        def engine(term):  # stands in for the engine: the real one needs WordNet data
+        def engine(term, on_preview=None):  # stands in for the engine: the real one needs WordNet data
             seen.append((term, lexical_engine.is_offline_only()))
             return dict(RUN, headword=term)
 
