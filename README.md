@@ -76,6 +76,18 @@ Hover a badge for the details. Learn the A1–B1 words first; the higher levels 
 
 The speaker button next to an example sentence reads it aloud and highlights each word as it is spoken. With the Kokoro neural voice the highlight follows an estimate of each word's timing (the voice gives no word timestamps), so it can be slightly off on long or unusual words. The fallback voices (Windows SAPI, or spd-say / espeak on Linux) play the sentence without highlighting. Playing another clip clears the highlight.
 
+### Reader
+
+Open **Reader** from the home screen or the menu, paste or type an English text and press **Read**. The text is shown as plain, wrapped text that you can scroll; it works for long texts too (a longer paste is cut after 300,000 characters, about 50,000 words).
+
+- **Look up a word:** click it. An inflected form is looked up as its base word ("ran" → "run", "studies" → "study"; a word that is in the level list is looked up as written). "don't", "it's" and "John's" are looked up as "do", "it" and "John". To look up a phrase, select several words with the mouse (up to 30 words; a selection that cuts a word in half covers the whole word).
+- **The result opens beside the text,** in a panel on the right. The text stays exactly where it is, so you never lose your place. Related words clicked inside the panel are also looked up in the panel, and its **‹ Back** button returns to the previous result.
+- **Saved words are marked** in blue, including any form of them ("run" marks ran and running) and saved phrases of two to four words ("break the ice" marks "broke the ice"). **Words above your level are marked** in amber with a dashed underline. Pick the level in **Mark level … and above** at the top; **Off** marks only your saved words. The choice is remembered. The marks are readable in both themes and need no internet.
+- **Words that are not in the bundled level list are not marked.** These are mostly names, rare words and typos, and marking them would light up every name; click one to look it up. Words in the list below your level are not marked either.
+- **Save a word in one step:** press the **☆ Save** star in the result panel, or right-click a word or selected phrase and choose **Save word**. A word that was never looked up is looked up first and saved when the result arrives. The right-click menu also has **Look up**, and **Remove … from saved words** for a saved one. Words you look up here appear in History like any other lookup.
+- **Offline-only mode** works: lookups then use only your history and Ocean's bundled data.
+- **Your text is kept** between sessions, together with your place in it, in `reader_text.json` in your user data folder (see [Your data](#your-data)). **Edit text** replaces it; reading an empty text deletes the file.
+
 ## Learning
 
 ### Review (spaced repetition)
@@ -167,7 +179,7 @@ Online dictionaries and Google Translate are used when available. Without intern
 
 ## Your data
 
-History, favourites, your translation fixes, settings and the log file (`ocean.log`) are stored per user, so updating or rebuilding the app never touches them:
+History, favourites, your translation fixes, settings, the Reader text and the log file (`ocean.log`) are stored per user, so updating or rebuilding the app never touches them:
 
 | System | Folder |
 |---|---|
