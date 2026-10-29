@@ -10,6 +10,7 @@ ocean.ico
 
 # Downloaded by setup_linux.sh / setup_windows.ps1 (too large for git)
 kokoro-v1.0.onnx
+kokoro-v1.0.int8.onnx
 voices-v1.0.bin
 *.part
 nltk_data/

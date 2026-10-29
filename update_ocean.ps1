@@ -32,8 +32,10 @@ foreach ($f in @("lexical_engine.py", "offline_lexicon.json", "cefr_levels.json"
     }
 }
 
-foreach ($vfile in @("kokoro-v1.0.onnx", "voices-v1.0.bin")) {
-    if (Test-Path $vfile) {
+# Ship one voice model: int8 (~88 MB) if present, else the full-size one (~310 MB).
+$voiceModel = @("kokoro-v1.0.int8.onnx", "kokoro-v1.0.onnx") | Where-Object { Test-Path $_ } | Select-Object -First 1
+foreach ($vfile in @($voiceModel, "voices-v1.0.bin")) {
+    if ($vfile -and (Test-Path $vfile)) {
         Copy-Item -Path $vfile -Destination ".\dist\Ocean\$vfile" -Force
     }
 }
