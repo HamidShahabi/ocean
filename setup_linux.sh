@@ -11,8 +11,9 @@ uv pip install --python .venv/bin/python -r requirements.lock
 NLTK_DATA="$PWD/nltk_data" .venv/bin/python -m nltk.downloader -d "$PWD/nltk_data" wordnet omw-1.4
 
 KOKORO_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
-for f in kokoro-v1.0.onnx voices-v1.0.bin; do
-    if [ ! -f "$f" ]; then
+# int8 model (~88 MB); an existing full-size kokoro-v1.0.onnx is used as is and not replaced.
+for f in kokoro-v1.0.int8.onnx voices-v1.0.bin; do
+    if [ ! -f "$f" ] && { [ "$f" != kokoro-v1.0.int8.onnx ] || [ ! -f kokoro-v1.0.onnx ]; }; then
         curl -fL --retry 3 -o "$f.part" "$KOKORO_URL/$f" && mv "$f.part" "$f"
     fi
 done

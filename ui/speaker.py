@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+import kokoro_files
 from ui.config import BASE_DIR, VOICE_OPTIONS, SettingsManager
 
 try:
@@ -96,18 +97,12 @@ class NeuralSpeaker(QObject):
         return kokoro_plays or HAS_WIN32_SAPI or FALLBACK_TTS_BIN is not None
 
     def _find_model_files(self) -> tuple[str, str]:
-        candidates = [
+        frozen = getattr(sys, "frozen", False)
+        return kokoro_files.find_kokoro_files([
             BASE_DIR,
-            os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else "",
-            os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "..")) if getattr(sys, "frozen", False) else "",
-        ]
-        for c in candidates:
-            if c:
-                onnx_p = os.path.join(c, "kokoro-v1.0.onnx")
-                voic_p = os.path.join(c, "voices-v1.0.bin")
-                if os.path.exists(onnx_p) and os.path.exists(voic_p):
-                    return onnx_p, voic_p
-        return "", ""
+            os.path.dirname(sys.executable) if frozen else "",
+            os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "..")) if frozen else "",
+        ])
 
     def _init_kokoro(self) -> None:
         if not HAS_KOKORO:
