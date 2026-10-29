@@ -55,9 +55,12 @@ class NeuralSpeaker(QObject):
         begun; speech starts `lead_in` s in and lasts `duration` s. Fallback voices (SAPI / CLI) give
         no length, so they report duration 0: play without word timing.
     playback_stopped(token): that clip ended or was cut off by stop() / the next speak().
+    voice_loaded(): the background load of the Kokoro model has finished (successfully or not); re-check
+        has_voice().
     """
     clip_started = pyqtSignal(int, float, float)
     playback_stopped = pyqtSignal(int)
+    voice_loaded = pyqtSignal()
 
     def __init__(self, settings: SettingsManager) -> None:
         super().__init__()
@@ -69,7 +72,29 @@ class NeuralSpeaker(QObject):
         self._play_lock = threading.Lock()
         # Not a daemon: quitting while onnxruntime is mid-load (~1s after start) crashes the process,
         # so let interpreter shutdown wait for the load to finish.
-        threading.Thread(target=self._init_kokoro).start()
+        self._loading = True
+        threading.Thread(target=self._load_kokoro).start()
+
+    def _load_kokoro(self) -> None:
+        try:
+            self._init_kokoro()
+        finally:
+            self._loading = False
+            try:
+                self.voice_loaded.emit()
+            except RuntimeError:  # the app quit while the model was loading
+                pass
+
+    def is_loading(self) -> bool:
+        """True while the Kokoro model is still loading in the background (it takes a moment after start)."""
+        return self._loading
+
+    def has_voice(self) -> bool:
+        """Whether speak() can make sound: Kokoro loaded with something to play it, or a fallback voice
+        (Windows SAPI, spd-say / espeak). False while Kokoro is still loading and there is no fallback; check
+        is_loading() and voice_loaded to tell "not yet" from "never"."""
+        kokoro_plays = self._kokoro is not None and (HAS_WINSOUND or WAV_PLAYER_CMD is not None)
+        return kokoro_plays or HAS_WIN32_SAPI or FALLBACK_TTS_BIN is not None
 
     def _find_model_files(self) -> tuple[str, str]:
         frozen = getattr(sys, "frozen", False)

@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
 import dictionary_sources  # noqa: E402
 import lexical_engine  # noqa: E402
+import quiz  # noqa: E402
 from ui import theme  # noqa: E402
 from ui.config import DB_FILE  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_SETTINGS, PAGE_TEACH  # noqa: E402
@@ -475,6 +476,133 @@ class UiSmokeTest(unittest.TestCase):
         page._on_mode_picked("Fill in the blank")
         self.assertIn("example sentence", page.done_label.text())
         self.assertFalse(page.typed_box.isVisible())
+
+    def open_listen_quiz(self, voice=True, loading=False):
+        """The quiz page in Listen and type mode, with the speaker faked so nothing makes sound."""
+        self.save_quiz_words()
+        speaker = self.win.speaker
+        for name, value in (("has_voice", voice), ("is_loading", loading)):
+            patcher = mock.patch.object(speaker, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.spoken = []
+        for name, side_effect in (("speak", lambda text: self.spoken.append(text) or len(self.spoken)),
+                                  ("stop", lambda: self.spoken.append(None))):
+            patcher = mock.patch.object(speaker, name, side_effect=side_effect)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.win.open_quiz()
+        QTest.qWaitForWindowActive(self.win)
+        page = self.win.quiz_page
+        page._on_mode_picked("Listen and type")
+        return page
+
+    def test_quiz_listen_and_type_speaks_replays_and_never_shows_the_word(self):
+        page = self.open_listen_quiz()
+        self.assertEqual(len(page.questions), 4)
+        question = page.questions[0]
+        self.assertEqual(self.spoken[-1], question.answer)  # auto-played as the question appeared
+        self.assertTrue(page.typed_box.isVisible())
+        self.assertTrue(page.replay_btn.isVisible())
+        self.assertTrue(page.answer_edit.hasFocus())
+        shown = " ".join([page.prompt_label.text(), page.hint_label.text()])
+        self.assertNotIn(question.answer, shown)
+
+        page.replay_btn.click()
+        self.assertEqual(self.spoken[-2:], [question.answer] * 2)
+        before = len(self.spoken)
+        QTest.keyClick(page.answer_edit, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier)  # Ctrl+R while typing
+        self.assertEqual(self.spoken[before:], [question.answer])
+        self.assertEqual(page.answer_edit.text(), "")  # no "r" was typed
+        QTest.keyClicks(page.answer_edit, "rrr")  # a plain r still types
+        self.assertEqual(len(self.spoken), before + 1)
+        self.assertEqual(page.answer_edit.text(), "rrr")
+
+        # A wrong answer reveals the word, the Persian meaning and counts as missed.
+        QTest.keyClick(page.answer_edit, Qt.Key.Key_Return)
+        self.assertIn("Not quite", page.verdict_label.text())
+        self.assertIn(question.answer, page.verdict_label.text())
+        self.assertIn(question.reveal, page.reveal_label.text())
+        QTest.keyClick(page, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier)  # replay still works after answering
+        self.assertEqual(self.spoken[-1], question.answer)
+        QTest.keyClick(page, Qt.Key.Key_Space)
+        self.assertEqual(self.spoken[-1], page.questions[1].answer)  # the next word is spoken on its own
+
+    def test_quiz_listen_and_type_checks_case_and_calls_one_typo_almost(self):
+        page = self.open_listen_quiz()
+        page.questions = [quiz.Question(
+            mode=quiz.LISTEN_MODE, prompt="Listen and type the word", answer=answer, query_key=answer,
+            direction=quiz.EN_ONLY, reveal="/x/ · معنی", speak=answer, near_miss=True) for answer in ("necessary", "water", "house")]
+        page.results = []
+        page._show_question()
+        QTest.keyClicks(page.answer_edit, "NECCESSARY")
+        QTest.keyClick(page.answer_edit, Qt.Key.Key_Return)
+        self.assertIn("Almost", page.verdict_label.text())
+        self.assertIn("correct spelling: <b>necessary</b>", page.verdict_label.text())
+        QTest.keyClick(page, Qt.Key.Key_Space)
+        QTest.keyClicks(page.answer_edit, "  WaTeR ")
+        QTest.keyClick(page.answer_edit, Qt.Key.Key_Return)
+        self.assertIn("Correct", page.verdict_label.text())
+        self.assertIn("water", page.verdict_label.text())  # the word is shown once answered
+        QTest.keyClick(page, Qt.Key.Key_Space)
+        QTest.keyClicks(page.answer_edit, "hous")  # four letters, one short of the word: still just a miss
+        QTest.keyClick(page.answer_edit, Qt.Key.Key_Return)
+        self.assertIn("Almost", page.verdict_label.text())
+        QTest.keyClick(page, Qt.Key.Key_Space)
+        self.assertTrue(page.finished)
+        self.assertEqual(page.prompt_label.text(), "1 of 3 correct")  # near-misses are not correct
+        self.assertIn("2 almost", page.done_label.text())
+        self.assertIn("/x/ · معنی", page.done_label.text())
+        self.assertEqual(self.spoken[-1], None)  # the score screen is silent
+        with closing(sqlite3.connect(DB_FILE)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 0)
+
+    def test_quiz_listen_and_type_stops_speech_when_leaving(self):
+        page = self.open_listen_quiz()
+        self.assertEqual(self.spoken[-1], page.questions[0].answer)
+        QTest.keyClick(page, Qt.Key.Key_Escape)  # nothing answered yet: leaves the quiz
+        self.assertIs(self.win.stack.currentWidget(), self.win.home_page)
+        self.assertIsNone(self.spoken[-1])
+
+    def test_quiz_other_modes_do_not_speak_or_show_replay(self):
+        page = self.open_listen_quiz()
+        page._on_mode_picked("Multiple choice")
+        self.assertFalse(page.replay_btn.isVisible())
+        spoken = len(self.spoken)
+        QTest.keyClick(page, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual([s for s in self.spoken[spoken:] if s], [])
+
+    def test_quiz_listen_and_type_is_disabled_without_a_voice(self):
+        page = self.open_listen_quiz(voice=False)
+        self.assertEqual(page.questions, [])
+        self.assertIn("needs a voice", page.done_label.text())
+        self.assertFalse(page.typed_box.isVisible())
+        self.assertFalse(page.replay_btn.isVisible())
+        self.assertEqual([s for s in self.spoken if s], [])
+        page._on_mode_picked("Multiple choice")  # the other modes are unaffected
+        self.assertTrue(page.choice_box.isVisible())
+
+    def test_quiz_listen_and_type_waits_for_the_voice_to_load(self):
+        page = self.open_listen_quiz(voice=False, loading=True)
+        self.assertIn("still loading", page.done_label.text())
+        self.assertEqual(page.questions, [])
+        with mock.patch.object(self.win.speaker, "has_voice", return_value=True), \
+                mock.patch.object(self.win.speaker, "is_loading", return_value=False):
+            self.win.speaker.voice_loaded.emit()
+        self.assertEqual(len(page.questions), 4)
+        self.assertTrue(page.typed_box.isVisible())
+        self.assertEqual(self.spoken[-1], page.questions[0].answer)
+        # Once running, a later voice_loaded does not restart the round.
+        page.results.append((page.questions[0], "x"))
+        self.win.speaker.voice_loaded.emit()
+        self.assertEqual(len(page.results), 1)
+
+    def test_quiz_listen_and_type_loading_that_ends_without_a_voice_says_so(self):
+        page = self.open_listen_quiz(voice=False, loading=True)
+        with mock.patch.object(self.win.speaker, "is_loading", return_value=False):
+            self.win.speaker.voice_loaded.emit()
+        self.assertIn("needs a voice", page.done_label.text())  # re-checked when loading finished: now the full explanation
+        self.assertEqual(page.questions, [])
 
     def test_quiz_reachable_from_home_and_menu(self):
         self.save_quiz_words()

@@ -2,7 +2,7 @@
 spaced-repetition schedule (see the note at the top of quiz.py)."""
 import html
 import logging
-from typing import List, Tuple, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCursor, QKeySequence, QShortcut
@@ -19,7 +19,7 @@ log = logging.getLogger("ocean.app")
 
 
 class QuizPage(QWidget):
-    """Quiz on your saved words. Multiple choice and typed-answer modes (fill in the blank); more plug in through quiz.MODES."""
+    """Quiz on your saved words. Multiple choice and typed-answer modes (fill in the blank, listen and type); more plug in through quiz.MODES."""
 
     def __init__(self, main_win: "MainWindow") -> None:
         super().__init__()
@@ -30,6 +30,8 @@ class QuizPage(QWidget):
         self.results: List[Tuple[quiz.Question, str]] = []  # (question, what was picked), in order asked
         self.answered = False
         self.finished = False
+        self.spoke = False  # a question's speech may be playing: stop it when the question goes away
+        self.waiting_for_voice = False  # showing "voice still loading": start by itself when it is ready
         self.setObjectName("QuizPage")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -78,6 +80,16 @@ class QuizPage(QWidget):
         self.hint_label.setObjectName("MutedText")
         vbox.addWidget(self.hint_label)
 
+        # Only for questions that speak (listen and type); Ctrl+R does the same and also works while typing.
+        self.replay_btn = QPushButton("Replay   (Ctrl+R)")
+        self.replay_btn.setObjectName("GlassPillButton")
+        self.replay_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.replay_btn.setFixedHeight(40)
+        self.replay_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.replay_btn.setToolTip("Hear the word again (Ctrl+R)")
+        self.replay_btn.clicked.connect(self.replay)
+        vbox.addWidget(self.replay_btn)
+
         self.choice_box = QWidget()
         c_lay = QVBoxLayout(self.choice_box)
         c_lay.setContentsMargins(0, 4, 0, 0)
@@ -96,7 +108,7 @@ class QuizPage(QWidget):
         vbox.addWidget(self.choice_box)
 
         # Typed answers: any Question without choices uses this box (Enter submits, then shows the verdict
-        # and Question.reveal; Enter/Space continues). Listen-and-type reuses it as is.
+        # and Question.reveal; Enter/Space continues). Fill in the blank and listen and type both use it.
         self.typed_box = QWidget()
         t_lay = QVBoxLayout(self.typed_box)
         t_lay.setContentsMargins(0, 4, 0, 0)
@@ -139,12 +151,16 @@ class QuizPage(QWidget):
 
         # While the answer box has focus it keeps letters, digits and Space (so keys 1-4 can't answer a
         # typed question); Return and Esc still reach these shortcuts.
-        bindings = [("Space", self.advance), ("Return", self.on_enter), ("Enter", self.on_enter), ("Esc", self.end_session)]
+        # Ctrl+R replays a spoken question: a modifier chord, so it works in the answer box without typing an "r".
+        bindings = [("Space", self.advance), ("Return", self.on_enter), ("Enter", self.on_enter), ("Esc", self.end_session),
+                    ("Ctrl+R", self.replay)]
         bindings += [(str(i + 1), lambda n=i: self.answer(n)) for i in range(quiz.CHOICE_COUNT)]
         for keys, slot in bindings:
             sc = QShortcut(QKeySequence(keys), self)
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(slot)
+        # The Kokoro voice loads in the background: re-check when it finishes.
+        main_win.speaker.voice_loaded.connect(self._on_voice_loaded)
 
     def start(self) -> None:
         """Begin a fresh session on the current saved words."""
@@ -154,32 +170,60 @@ class QuizPage(QWidget):
             log.exception("Could not load saved words for the quiz")
             items = []
         self.saved_count = len(items)
-        self.questions = quiz.new_session(items, self.mode_key)
+        self.questions = []
         self.results = []
         self.finished = False
+        self.waiting_for_voice = False
+        reason = quiz.missing_capability(self.mode_key, self._capabilities(), self._loading_capabilities())
+        if reason:  # e.g. no voice for listen and type: nothing to ask until that changes
+            self.waiting_for_voice = reason == quiz.MODES[self.mode_key].loading_message
+            self._show_unavailable(reason, "Voice still loading" if self.waiting_for_voice else "No voice available")
+            return
+        self.questions = quiz.new_session(items, self.mode_key)
         if not self.questions:
-            self._show_unavailable()
+            self._show_unavailable(quiz.unavailable_message(self.mode_key, self.saved_count), "Not enough saved words")
             return
         self._show_question()
+
+    def _capabilities(self) -> set:
+        return {quiz.CAP_VOICE} if self.main_win.speaker.has_voice() else set()
+
+    def _loading_capabilities(self) -> set:
+        return {quiz.CAP_VOICE} if self.main_win.speaker.is_loading() else set()
+
+    def _on_voice_loaded(self) -> None:
+        if self.waiting_for_voice and self.isVisible():
+            self.start()
 
     def _on_mode_picked(self, label: str) -> None:
         self.mode_key = self.mode_labels[label]
         self.start()
 
+    def _stop_speech(self) -> None:
+        if self.spoke:
+            self.spoke = False
+            self.main_win.speaker.stop()
+
+    def hideEvent(self, event) -> None:
+        self._stop_speech()  # leaving the quiz page silences the word
+        super().hideEvent(event)
+
     def _hide_question(self) -> None:
+        self._stop_speech()
+        self.replay_btn.hide()
         self.hint_label.hide()
         self.choice_box.hide()
         self.typed_box.hide()
         self.next_btn.hide()
         self.done_label.hide()
 
-    def _show_unavailable(self) -> None:
+    def _show_unavailable(self, message: str, title: str) -> None:
         self.finished = True
         self._hide_question()
         self.progress_label.setText("")
-        self.prompt_label.setText("Not enough saved words")
+        self.prompt_label.setText(title)
         self.prompt_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.done_label.setText(html.escape(quiz.unavailable_message(self.mode_key, self.saved_count)).replace("\n", "<br>"))
+        self.done_label.setText(html.escape(message).replace("\n", "<br>"))
         self.done_label.show()
 
     def _show_question(self) -> None:
@@ -201,6 +245,9 @@ class QuizPage(QWidget):
             self.answer_edit.setAlignment(PERSIAN_ALIGNMENT if question.answer_is_persian else Qt.AlignmentFlag.AlignLeft)
             self.typed_box.show()
             self.answer_edit.setFocus()
+            if question.speak:
+                self.replay_btn.show()
+                self.replay()  # auto-play as the question appears
             return
         for i, btn in enumerate(self.choice_btns):
             has_choice = i < len(question.choices)
@@ -209,6 +256,21 @@ class QuizPage(QWidget):
             if has_choice:
                 btn.setText(f"{i + 1}    {question.choices[i]}")
         self.choice_box.show()
+
+    def _current_question(self) -> Optional[quiz.Question]:
+        """The question on screen: the one just answered while its verdict is showing, else the next to answer."""
+        if self.finished or not self.questions:
+            return None
+        if self.answered:
+            return self.results[-1][0]
+        return self.questions[len(self.results)] if len(self.results) < len(self.questions) else None
+
+    def replay(self) -> None:
+        """Speak the current question's word again (no-op for questions that don't speak)."""
+        question = self._current_question()
+        if question is not None and question.speak:
+            self.spoke = True
+            self.main_win.speaker.speak(question.speak)
 
     @staticmethod
     def _style_choice(btn: QPushButton, name: str) -> None:
@@ -254,8 +316,13 @@ class QuizPage(QWidget):
         question = self.questions[len(self.results)]
         self.answered = True
         self.results.append((question, text))
-        if question.is_correct(text):
-            self.verdict_label.setText("<b style='color:#2EA043'>Correct</b>")
+        grade = question.grade(text)
+        if grade == quiz.CORRECT:
+            # A spoken question never showed its word, so show it now.
+            word = f" — <b>{html.escape(question.answer)}</b>" if question.speak else ""
+            self.verdict_label.setText(f"<b style='color:#2EA043'>Correct</b>{word}")
+        elif grade == quiz.ALMOST:  # one typo away: a miss for the score, but say what the spelling is
+            self.verdict_label.setText(f"<b style='color:#D29922'>Almost</b> — correct spelling: <b>{html.escape(question.near_miss_of(text))}</b>")
         else:
             self.verdict_label.setText(f"<b style='color:#F85149'>Not quite</b> — answer: <b>{html.escape(question.answer)}</b>")
         self.reveal_label.setText(question.reveal)
@@ -290,6 +357,9 @@ class QuizPage(QWidget):
         self.prompt_label.setText(f"{correct} of {total} correct")
         self.prompt_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         lines = [f"{round(100 * correct / total)}%" + (" · ended early" if early else "")]
+        almost = sum(1 for q, picked in self.results if q.grade(picked) == quiz.ALMOST)
+        if almost:
+            lines.append(f"{almost} almost (one typo away) — counted as missed")
         missed = [q for q, picked in self.results if not q.is_correct(picked)]
         if missed:
             lines.append("<br><b>To practise</b>")
