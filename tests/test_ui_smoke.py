@@ -14,6 +14,7 @@ os.environ["XDG_DATA_HOME"] = _DATA
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PyQt6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, pyqtSignal  # noqa: E402
 from PyQt6.QtGui import QTextCursor  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
@@ -27,6 +28,8 @@ from ui import theme  # noqa: E402
 from ui.config import DB_FILE, READER_FILE, SettingsManager  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_SETTINGS, PAGE_TEACH  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
+from ui import pronounce_page  # noqa: E402
+from lexicon_fixture import use_lexicon  # noqa: E402
 
 WORD = {
     "headword": "serendipity",
@@ -70,10 +73,11 @@ IDIOM = {
 
 class FakeWorker(QObject):
     """Stands in for EngineWorker so a lookup never touches the network."""
+    preview_ready = pyqtSignal(str, dict)
     finished_success = pyqtSignal(str, dict)
     finished_error = pyqtSignal(str)
 
-    def __init__(self, term, deep_mode=False):
+    def __init__(self, term):
         super().__init__()
         self.term = term
 
@@ -197,7 +201,6 @@ class UiSmokeTest(unittest.TestCase):
         self.win.right_drawer.settings_page.theme_drop.setCurrentText("Dark Mode")
         with mock.patch("ui.main_window.start_worker"):
             self.win._analyze_input(force_refresh=True)  # Refresh button
-            self.win._analyze_input(force_refresh=True, deep_mode=True)  # Deep search
         self.assertEqual(self._count("serendipity"), 2)
         self.win._analyze_input(override_term="break the ice")
         self.win._go_back()  # back/forward re-show an entry, they are not new lookups
@@ -298,27 +301,85 @@ class UiSmokeTest(unittest.TestCase):
     def test_settings_lists_every_source_and_applies_the_toggles(self):
         registry = dictionary_sources.REGISTRY
         page = self.win.right_drawer.settings_page
-        self.assertEqual(list(page.source_checks), [s.name for s in registry.all() if not s.part_of])
+        self.assertEqual(list(page.source_checks), registry.names())
         self.assertTrue(all(box.isChecked() for box in page.source_checks.values()))
         for source in registry.all():
-            if not source.part_of:
-                self.assertIn(source.label, page.source_checks[source.name].text())
-        page.source_checks["cambridge"].setChecked(False)
+            self.assertEqual(source.label, page.source_checks[source.name].text())
+        page.source_checks["urban_dictionary"].setChecked(False)
         page.source_checks["wordnet"].setChecked(False)
         with mock.patch.object(self.win.settings, "save") as save:
             page._apply_live()
         self.assertTrue(save.called)
-        self.assertEqual(self.win.settings.data["disabled_sources"], ["cambridge", "wordnet"])
-        self.assertEqual(registry.disabled_names(), ["cambridge", "wordnet"])
-        page.source_checks["cambridge"].setChecked(True)
+        self.assertEqual(self.win.settings.data["disabled_sources"], ["wordnet", "urban_dictionary"])  # menu order
+        self.assertEqual(registry.disabled_names(), ["urban_dictionary", "wordnet"])
+        page.source_checks["urban_dictionary"].setChecked(True)
         with mock.patch.object(self.win.settings, "save"):
             page._apply_live()
         self.assertEqual(registry.disabled_names(), ["wordnet"])
         # Reopening the page drops ticks that were never applied.
-        page.source_checks["longman"].setChecked(False)
+        page.source_checks["corpora"].setChecked(False)
         page.on_show()
-        self.assertTrue(page.source_checks["longman"].isChecked())
+        self.assertTrue(page.source_checks["corpora"].isChecked())
         self.assertFalse(page.source_checks["wordnet"].isChecked())
+
+    def test_offline_badge_says_where_the_result_came_from(self):
+        lexical_engine.set_offline_only(True)
+        cases = [
+            (dict(WORD, _from_history=True), "your history"),
+            (dict(WORD, persian_source=lexical_engine.FA_SOURCE_NLLB), "Persian by the offline translator"),
+            (dict(WORD, persian_source=lexical_engine.FA_SOURCE_WIKTIONARY), "Ocean's internal dictionary"),
+        ]
+        for payload, expected in cases:
+            self.win.results_page.render("serendipity", payload)
+            self.assertIn(expected, offline_badges(self.win)[0].text())
+
+    def test_a_saved_lookup_shown_offline_is_marked_as_history(self):
+        lexical_engine.set_offline_only(True)
+        with mock.patch("ui.main_window.start_worker"):
+            self.win._analyze_input(override_term="serendipity")
+        self.assertIn("your history", offline_badges(self.win)[0].text())
+        self.assertNotIn("_from_history", self.win.db.get_entry("serendipity"))  # never stored
+
+    def test_synonyms_are_grouped_under_their_sense_and_derived_terms_show(self):
+        payload = dict(WORD, derived_terms=["serendipitous", "serendipitously"], synonyms=[
+            {"term": "luck", "fa": "شانس", "sense": "noun: an unknown force"},
+            {"term": "fortune", "fa": "بخت", "sense": "noun: an unknown force"},
+            {"term": "chance", "fa": "اتفاق", "sense": "noun: an unplanned event"},
+        ])
+        self.win.results_page.render("serendipity", payload)
+        texts = card_texts(self.win)
+        self.assertEqual(texts.count("noun: an unknown force"), 1)  # one heading per sense
+        self.assertEqual(texts.count("noun: an unplanned event"), 1)
+        self.assertLess(texts.index("noun: an unknown force"), texts.index("noun: an unplanned event"))
+        self.assertIn("<b>Derived terms:</b>", texts)
+        links = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
+        self.assertIn("serendipitously", links)
+
+    def test_pronounce_page_reads_aloud_with_ipa_and_never_translates(self):
+        use_lexicon(self)
+        self.win.right_drawer.show_page(PAGE_MENU)
+        menu_btn = next(b for b in self.win.right_drawer.findChildren(QPushButton) if b.text() == "Pronounce")
+        no_lookup = AssertionError("the Pronounce page must not look up or translate")
+        with mock.patch.object(lexical_engine, "analyze_with_dictionaries", side_effect=no_lookup), \
+             mock.patch.object(lexical_engine, "translate_with_source", side_effect=no_lookup), \
+             mock.patch.object(lexical_engine, "translate_batch_fast", side_effect=no_lookup), \
+             mock.patch.object(self.win.speaker, "has_voice", return_value=True), \
+             mock.patch.object(self.win.speaker, "speak", return_value=7) as speak:
+            menu_btn.click()
+            page = self.win.pronounce_page
+            self.assertIs(self.win.stack.currentWidget(), page)
+            page.input.setPlainText("  bank  ")
+            page.pronounce()
+            page.worker.wait(5000)
+            for _ in range(20):
+                self.app.processEvents()
+                if page.ipa_label.text():
+                    break
+                time.sleep(0.05)
+        speak.assert_called_once_with("bank")
+        self.assertEqual(page.text_label.text(), "bank")
+        self.assertEqual(page.ipa_label.text(), "US  /bæŋk/")  # the dictionary's transcription for a word
+        self.assertEqual(pronounce_page.ipa_for("bank of the river").count("/"), 2)  # word by word for a phrase
 
     def test_a_clear_message_shows_only_when_every_source_is_off(self):
         registry = dictionary_sources.REGISTRY
@@ -730,6 +791,29 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(saved["_engine_version"], lexical_engine.ENGINE_VERSION)
         self.assertEqual(self.win.current_data["persian_equivalent"], "شانس خوب")
 
+    def test_a_preview_shows_first_and_the_full_entry_replaces_it(self):
+        with mock.patch("ui.main_window.EngineWorker", FakeWorker), mock.patch("ui.main_window.start_worker"):
+            self.win._analyze_input(override_term="zeitgeist")
+        worker = self.win.worker
+        preview = dict(WORD, headword="zeitgeist", persian_equivalent=lexical_engine.PENDING_FA, _preview=True)
+        worker.preview_ready.emit("zeitgeist", preview)
+        self.assertIn("Finding something good by chance.", " ".join(card_texts(self.win)))
+        self.assertIn("Translating", self.win.status_label.text())
+        self.assertIsNone(self.win.current_data)  # nothing to edit or save yet
+        self.assertIsNone(self.win.db.get_entry("zeitgeist"))
+        worker.finished_success.emit("zeitgeist", dict(WORD, headword="zeitgeist", persian_equivalent="روح زمانه"))
+        self.assertEqual(self.win.current_data["persian_equivalent"], "روح زمانه")
+        self.assertEqual(self.win.status_label.text(), "")
+        self.win.db.delete_entry("zeitgeist")
+
+    def test_a_refresh_that_fails_after_its_preview_shows_the_saved_copy(self):
+        worker = self._lookup_stale()
+        worker.preview_ready.emit("serendipity", dict(WORD, senses=[{"pos": "Noun", "def": "A preview sense."}], _preview=True))
+        self.assertIn("A preview sense.", " ".join(card_texts(self.win)))
+        worker.finished_error.emit("no network")
+        self.assertIn("Finding something good by chance.", " ".join(card_texts(self.win)))  # the saved copy is back
+        self.assertEqual(self.win.current_data["persian_equivalent"], WORD["persian_equivalent"])
+
     def test_stale_entry_is_shown_when_the_refetch_fails_or_is_empty(self):
         for outcome in ("error", "empty"):
             worker = self._lookup_stale()
@@ -1140,7 +1224,7 @@ class ReaderPageTest(unittest.TestCase):
         lexical_engine.set_offline_only(True)
         seen = []
 
-        def engine(term, deep_mode=False):  # stands in for the engine: the real one needs WordNet data
+        def engine(term, on_preview=None):  # stands in for the engine: the real one needs WordNet data
             seen.append((term, lexical_engine.is_offline_only()))
             return dict(RUN, headword=term)
 

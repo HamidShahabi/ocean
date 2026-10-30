@@ -4,28 +4,16 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from urllib.parse import urlparse
 
 # lexical_engine creates its per-user data folder on import: keep tests away from the real one.
 _DATA = tempfile.mkdtemp()
 os.environ["XDG_DATA_HOME"] = _DATA
 os.environ["APPDATA"] = _DATA
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lexical_engine as le  # noqa: E402
 import dictionary_sources as ds  # noqa: E402
 from ui.config import SettingsManager  # noqa: E402
-from test_dictionary_sources import fixture_site  # noqa: E402
-
-# The site each network source talks to (what a recorded request URL is checked against).
-HOSTS = {
-    "thefreedictionary": "idioms.thefreedictionary.com",
-    "wiktionary": "en.wiktionary.org",
-    "cambridge": "dictionary.cambridge.org",
-    "longman": "www.ldoceonline.com",
-    "dictionaryapi": "api.dictionaryapi.dev",
-    "datamuse": "api.datamuse.com",
-    "tatoeba": "tatoeba.org",
-}
+from lexicon_fixture import use_lexicon  # noqa: E402
 
 
 def enable_every_source():
@@ -47,19 +35,19 @@ class SettingsStoreTest(unittest.TestCase):
 
     def test_defaults_are_not_shared_between_managers(self):
         a = SettingsManager(self.path)
-        a.data["disabled_sources"].append("cambridge")
+        a.data["disabled_sources"].append("kaikki")
         self.assertEqual(SettingsManager(self.path).data["disabled_sources"], [])
         self.assertEqual(SettingsManager.DEFAULTS["disabled_sources"], [])
 
     def test_choice_persists_and_is_applied_to_the_registry(self):
         s = SettingsManager(self.path)
-        s.data["disabled_sources"] = ["cambridge", "wordnet"]
+        s.data["disabled_sources"] = ["urban_dictionary", "wordnet"]
         s.save()
         reloaded = SettingsManager(self.path)
-        self.assertEqual(reloaded.data["disabled_sources"], ["cambridge", "wordnet"])
+        self.assertEqual(reloaded.data["disabled_sources"], ["urban_dictionary", "wordnet"])
         reloaded.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["cambridge", "wordnet"])
-        self.assertTrue(ds.REGISTRY.is_enabled("longman"))
+        self.assertEqual(ds.REGISTRY.disabled_names(), ["urban_dictionary", "wordnet"])
+        self.assertTrue(ds.REGISTRY.is_enabled("kaikki"))
         # Switching one back on is applied too.
         reloaded.data["disabled_sources"] = ["wordnet"]
         reloaded.apply_sources()
@@ -67,13 +55,21 @@ class SettingsStoreTest(unittest.TestCase):
 
     def test_unknown_and_malformed_entries_are_ignored(self):
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"disabled_sources": ["longman", "no_such_source", 7, ["x"]]}, f)
+            json.dump({"disabled_sources": ["corpora", "no_such_source", 7, ["x"]]}, f)
         s = SettingsManager(self.path)
         s.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["longman"])
+        self.assertEqual(ds.REGISTRY.disabled_names(), ["corpora"])
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"disabled_sources": "cambridge"}, f)
+            json.dump({"disabled_sources": "kaikki"}, f)
         self.assertEqual(SettingsManager(self.path).data["disabled_sources"], [])
+
+    def test_sources_removed_in_an_update_are_ignored(self):
+        # A settings file from a version with the online dictionaries (Cambridge, Longman...) still loads.
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"disabled_sources": ["cambridge", "longman", "datamuse", "wordnet"]}, f)
+        s = SettingsManager(self.path)
+        s.apply_sources()
+        self.assertEqual(ds.REGISTRY.disabled_names(), ["wordnet"])
 
     def test_a_settings_file_from_before_the_toggles_keeps_everything_on(self):
         with open(self.path, "w", encoding="utf-8") as f:
@@ -91,73 +87,62 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertTrue(ds.REGISTRY.any_enabled())
 
 
-class DisabledSourcesAreNeverContactedTest(unittest.TestCase):
-    """Runs whole lookups with every request recorded: a switched-off site must not be asked anything."""
+class DisabledSourcesAreNeverReadTest(unittest.TestCase):
+    """Whole lookups with every source's fetch recorded: a switched-off source must not be read."""
 
     def setUp(self):
-        self.urls = []
+        use_lexicon(self)
+        self.fetched = []
+        for source in ds.REGISTRY.all():
+            original = source.fetch
 
-        def recorder(method, url, **kwargs):
-            self.urls.append(url)
-            return fixture_site(method, url, **kwargs)
+            def recording(ctx, entry, prior, name=source.name, original=original):
+                self.fetched.append(name)
+                return original(ctx, entry, prior)
 
+            p = mock.patch.object(source, "fetch", recording)
+            p.start()
+            self.addCleanup(p.stop)
         for p in (
-            mock.patch.object(le, "smart_request", recorder),
             mock.patch.object(le, "wn", None),
             mock.patch.object(le, "LEMMATIZER", None),
-            mock.patch.object(le, "fetch_persian_word_meaning", lambda t, is_idiom=False: "FA:" + t),
+            mock.patch.object(le, "fetch_persian_word_meaning", lambda t, is_idiom=False: ("FA:" + t, "")),
             mock.patch.object(le, "translate_batch_fast", lambda sentences, short_terms: {s: "fa " + s for s in list(sentences) + list(short_terms)}),
         ):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(enable_every_source)
 
-    def contacted_hosts(self):
-        return {urlparse(u).netloc for u in self.urls}
-
     def lookup_all_kinds(self):
-        """A word, a deep search, an idiom and a misspelling (which asks for suggestions) reach every site."""
-        results = [le.analyze_with_dictionaries(t) for t in ("bright", "break the ice", "brigt")]
-        return results + [le.analyze_with_dictionaries("bright", deep_mode=True)]
+        return [le.analyze_with_dictionaries(t) for t in ("bright", "break the ice", "rizz")]
 
-    def test_every_network_source_is_contacted_when_enabled(self):
-        self.lookup_all_kinds()
-        for name, host in HOSTS.items():
-            self.assertIn(host, self.contacted_hosts(), name)
-
-    def test_a_disabled_source_is_never_contacted(self):
-        for name, host in HOSTS.items():
+    def test_a_disabled_source_is_never_read(self):
+        for name in ds.REGISTRY.names():
             with self.subTest(source=name):
-                self.urls.clear()
+                self.fetched.clear()
                 ds.REGISTRY.set_enabled(name, False)
                 results = self.lookup_all_kinds()
                 ds.REGISTRY.set_enabled(name, True)
-                self.assertNotIn(host, self.contacted_hosts())
+                self.assertNotIn(name, self.fetched)
                 self.assertTrue(all(r["headword"] for r in results))  # the others still answer
 
-    def test_a_lookup_works_with_any_one_source_disabled(self):
-        for name in ds.REGISTRY.names():
-            with self.subTest(source=name):
-                ds.REGISTRY.set_enabled(name, False)
-                result = le.analyze_with_dictionaries("bright")
-                ds.REGISTRY.set_enabled(name, True)
-                self.assertEqual(result["headword"], "bright")
-                self.assertTrue(result["ipa_us"])
+    def test_every_enabled_source_is_read(self):
+        self.lookup_all_kinds()
+        self.assertEqual(set(self.fetched), {"kaikki", "urban_dictionary", "corpora"})  # WordNet is absent here
 
-    def test_nothing_is_contacted_with_every_source_disabled(self):
+    def test_nothing_is_read_with_every_source_disabled(self):
         for name in ds.REGISTRY.names():
             ds.REGISTRY.set_enabled(name, False)
         results = self.lookup_all_kinds()
-        self.assertEqual(self.urls, [])
-        self.assertEqual([r["senses"] for r in results], [[]] * 4)
-        self.assertEqual([r["headword"] for r in results], ["bright", "break the ice", "brigt", "bright"])
+        self.assertEqual(self.fetched, [])
+        self.assertEqual([r["senses"] for r in results], [[]] * 3)
 
-    def test_only_one_source_left_on_is_the_only_one_contacted(self):
+    def test_only_one_source_left_on(self):
         for name in ds.REGISTRY.names():
-            ds.REGISTRY.set_enabled(name, name == "longman")
+            ds.REGISTRY.set_enabled(name, name == "kaikki")
         result = le.analyze_with_dictionaries("bright")
-        self.assertEqual(self.contacted_hosts(), {HOSTS["longman"]})
-        self.assertEqual(result["senses"][0]["def"], "Shining strongly with a lot of light.")
+        self.assertEqual(set(self.fetched), {"kaikki"})
+        self.assertEqual(result["senses"][0]["def"], "(informal) Giving off a lot of light.")
 
 
 if __name__ == "__main__":

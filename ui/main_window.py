@@ -1,5 +1,5 @@
 """The main window: top bar, home page and navigation. It wires the pages together; the pages
-themselves live in results_page.py, review_page.py, quiz_page.py, reader_page.py and drawer.py (history, settings, Teach Ocean)."""
+themselves live in results_page.py, review_page.py, quiz_page.py, reader_page.py, pronounce_page.py and drawer.py (history, settings, Teach Ocean)."""
 import logging
 import os
 import re
@@ -7,9 +7,8 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from bs4 import BeautifulSoup
 from PyQt6.QtCore import Qt, QEvent, QObject, QPoint, QSize, QTimer
-from PyQt6.QtGui import QCursor, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import QCursor, QIcon, QKeySequence, QShortcut, QTextDocumentFragment
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -32,6 +31,7 @@ from ui.config import DB_FILE, SettingsManager
 from ui.drawer import AttachedRightDrawer
 from ui.results_page import ResultsPage
 from ui.quiz_page import QuizPage
+from ui.pronounce_page import PronouncePage
 from ui.reader_page import ReaderPage
 from ui.review_page import ReviewPage
 from ui.speaker import NeuralSpeaker
@@ -93,7 +93,6 @@ class MainWindow(QMainWindow):
         persian_owner: Optional[PersianTranslationWidget] = widget.property("persian_owner") if isinstance(widget, QLabel) else None
         if persian_owner is not None:
             options.append("Edit Persian Translation")
-            options.append("Auto-Fix Translation")
 
         if isinstance(widget, QLineEdit):
             if selected_txt:
@@ -115,8 +114,6 @@ class MainWindow(QMainWindow):
                 self._analyze_input(force_refresh=False, override_term=clean_sel)
             elif act == "Edit Persian Translation" and persian_owner:
                 persian_owner.trigger_manual_edit()
-            elif act == "Auto-Fix Translation" and persian_owner:
-                persian_owner.trigger_auto_fix()
             elif act == "Copy":
                 if isinstance(widget, QLineEdit):
                     widget.copy()
@@ -130,7 +127,7 @@ class MainWindow(QMainWindow):
                 if isinstance(widget, QLineEdit):
                     widget.selectAll()
                 elif isinstance(widget, QLabel):
-                    plain = BeautifulSoup(widget.text(), "lxml").get_text(" ", strip=True)
+                    plain = " ".join(QTextDocumentFragment.fromHtml(widget.text()).toPlainText().split())
                     QApplication.clipboard().setText(plain)
             elif act == "Clear" and isinstance(widget, QLineEdit):
                 widget.clear()
@@ -330,6 +327,10 @@ class MainWindow(QMainWindow):
         self.reader_page = ReaderPage(self)
         self.stack.addWidget(self.reader_page)
 
+        # VIEW 5: Pronounce (read a text aloud with its IPA, no translation)
+        self.pronounce_page = PronouncePage(self)
+        self.stack.addWidget(self.pronounce_page)
+
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)
         self.debounce_timer.setInterval(150)
@@ -439,6 +440,13 @@ class MainWindow(QMainWindow):
         self.reader_page.start()
         self.stack.setCurrentIndex(4)
 
+    def open_pronounce(self) -> None:
+        self.sug_popup.hide()
+        self.right_drawer.hide()
+        self.status_label.setText("")
+        self.stack.setCurrentIndex(5)
+        self.pronounce_page.start()
+
     def refresh_review_badges(self) -> None:
         try:
             due = self.review_page.store.due_count(datetime.now())
@@ -479,7 +487,7 @@ class MainWindow(QMainWindow):
         self.input_box.setText(text)
         self._analyze_input(force_refresh=False)
 
-    def _analyze_input(self, force_refresh: bool = False, override_term: Optional[str] = None, deep_mode: bool = False) -> None:
+    def _analyze_input(self, force_refresh: bool = False, override_term: Optional[str] = None) -> None:
         self.sug_popup.hide()
         if override_term:
             self.input_box.setText(override_term)
@@ -496,11 +504,11 @@ class MainWindow(QMainWindow):
 
         self._switch_to_results_view()
 
-        if not force_refresh and not deep_mode and not self._navigating_history:
+        if not force_refresh and not self._navigating_history:
             # A user-initiated lookup (cached or fresh) counts once; refreshes and back/forward do not.
             self.db.record_lookup(term)
         self._stale_copy = None
-        if not force_refresh and not deep_mode:
+        if not force_refresh:
             cached = self.db.get_entry(term)
             if cached and (cached.get("senses") or cached.get("is_sentence")):
                 if self._should_refresh(cached):
@@ -511,19 +519,19 @@ class MainWindow(QMainWindow):
                 self.explore_btn.setEnabled(True)
                 self.current_term = term
                 self.current_data = cached
+                cached["_from_history"] = True  # the offline-only notice says so
                 self.results_page.render(term, cached)
                 self.status_label.setText("")
                 return
 
         self.explore_btn.setEnabled(False)
-        if deep_mode:
-            self.status_label.setText(f"Deep searching '{term}'...")
-        elif self._stale_copy is not None:
+        if self._stale_copy is not None:
             self.status_label.setText(f"Refreshing '{term}'...")
         else:
             self.status_label.setText(f"Analyzing '{term}'...")
 
-        self.worker = EngineWorker(term, deep_mode=deep_mode)
+        self.worker = EngineWorker(term)
+        self.worker.preview_ready.connect(self._on_preview)
         self.worker.finished_success.connect(self._on_inference_success)
         self.worker.finished_error.connect(self._on_inference_error)
         start_worker(self.worker)
@@ -543,6 +551,17 @@ class MainWindow(QMainWindow):
         self.current_data = stale
         self.results_page.render(term, stale)
         self.status_label.setText(note)
+
+    def _on_preview(self, term: str, data: Dict[str, Any]) -> None:
+        """Show what the local data says straight away; the full entry replaces it when its Persian is ready
+        (or, for a refresh that fails, the saved copy does)."""
+        if self.sender() is not self.worker:
+            return
+        lexical_engine.apply_user_overrides(data)
+        self.current_term = term
+        self.current_data = None  # nothing to edit or save until the full entry arrives
+        self.results_page.render(term, data)
+        self.status_label.setText(f"Translating '{term}'...")
 
     def _on_inference_success(self, term: str, data: Dict[str, Any]) -> None:
         if self.sender() is not self.worker:

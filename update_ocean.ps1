@@ -22,14 +22,18 @@ if (-not (Test-Path ".\ocean.ico")) {
     & ".\.venv\Scripts\python.exe" app.py --make-icon
 }
 
-& ".\.venv\Scripts\pyinstaller.exe" --noconfirm --noconsole --onedir --paths="." --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=bs4 --hidden-import=lxml --hidden-import=kokoro_onnx --hidden-import=eng_to_ipa --hidden-import=nltk --hidden-import=ctranslate2 --hidden-import=sentencepiece --name "Ocean" --icon="ocean.ico" app.py
+& ".\.venv\Scripts\pyinstaller.exe" --noconfirm --noconsole --onedir --paths="." --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=kokoro_onnx --hidden-import=eng_to_ipa --hidden-import=nltk --hidden-import=ctranslate2 --hidden-import=sentencepiece --name "Ocean" --icon="ocean.ico" app.py
 
 # User data (history, memory, settings) lives in %APPDATA%\Ocean, not in the build.
-foreach ($f in @("lexical_engine.py", "offline_lexicon.json", "cefr_levels.json", "ocean_offline_core.db")) {
+foreach ($f in @("lexical_engine.py", "cefr_levels.json")) {
     if (Test-Path $f) {
         Copy-Item -Path $f -Destination ".\dist\Ocean\$f" -Force
         Copy-Item -Path $f -Destination ".\dist\Ocean\_internal\$f" -Force
     }
+}
+# The dictionary database (~250 MB) is read next to Ocean.exe only.
+if (Test-Path "ocean_lexicon.db") {
+    Copy-Item -Path "ocean_lexicon.db" -Destination ".\dist\Ocean\ocean_lexicon.db" -Force
 }
 
 # Ship one voice model: int8 (~88 MB) if present, else the full-size one (~310 MB).
@@ -49,10 +53,14 @@ if (Test-Path ".\nltk_data") {
 if (Test-Path "offline_mt_model") {
     Copy-Item -Path "offline_mt_model" -Destination ".\dist\Ocean\offline_mt_model" -Recurse -Force
 }
+if (Test-Path "offline_slm_model") {
+    Copy-Item -Path "offline_slm_model" -Destination ".\dist\Ocean\offline_slm_model" -Recurse -Force
+}
 
 $sitePackages = ".\.venv\Lib\site-packages"
 $internalDir = ".\dist\Ocean\_internal"
-foreach ($pkg in @("kokoro_onnx", "espeakng_loader", "phonemizer", "segments", "language_tags", "eng_to_ipa", "ctranslate2", "sentencepiece")) {
+# llama_cpp: the optional language model runtime (setup_windows.ps1 -WithSlm), copied only when installed.
+foreach ($pkg in @("kokoro_onnx", "espeakng_loader", "phonemizer", "segments", "language_tags", "eng_to_ipa", "ctranslate2", "sentencepiece", "llama_cpp")) {
     $src = Join-Path $sitePackages $pkg
     $dst = Join-Path $internalDir $pkg
     if (Test-Path $src) { Copy-Item -Path $src -Destination $dst -Recurse -Force }

@@ -22,7 +22,6 @@ from ui import theme
 from ui.config import SettingsManager
 from ui.speaker import NeuralSpeaker
 from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS, VectorIcons, make_polished_font
-from ui.workers import AutoFixWorker, start_worker
 
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
@@ -278,7 +277,6 @@ class PersianTranslationWidget(QWidget):
         self.main_win = main_win
         self.mode = mode
         self.revealed = (mode == "Always Show")
-        self._fix_worker: Optional[AutoFixWorker] = None
 
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -293,13 +291,6 @@ class PersianTranslationWidget(QWidget):
         self.reveal_btn.setFixedHeight(32)
         self.reveal_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.reveal_btn.clicked.connect(self._reveal)
-
-        self.autofix_btn = QPushButton("Auto-Fix")
-        self.autofix_btn.setObjectName("SpoilerPill")
-        self.autofix_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.autofix_btn.setFixedHeight(28)
-        self.autofix_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.autofix_btn.clicked.connect(self.trigger_auto_fix)
 
         self.edit_btn = QPushButton("Edit")
         self.edit_btn.setObjectName("SpoilerPill")
@@ -320,7 +311,6 @@ class PersianTranslationWidget(QWidget):
         self.label.setObjectName("PersianText")
 
         layout.addWidget(self.reveal_btn, 0, Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(self.autofix_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.edit_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.label, 1)
 
@@ -337,28 +327,11 @@ class PersianTranslationWidget(QWidget):
     def _sync_visibility(self) -> None:
         self.reveal_btn.setVisible(not self.revealed)
         self.label.setVisible(self.revealed)
-        show_tools = self.revealed and self._is_missing_translation() and bool(self.en_source)
-        self.autofix_btn.setVisible(show_tools)
-        self.edit_btn.setVisible(show_tools)
+        self.edit_btn.setVisible(self.revealed and self._is_missing_translation() and bool(self.en_source))
 
     def _reveal(self) -> None:
         self.revealed = True
         self._sync_visibility()
-
-    def trigger_auto_fix(self) -> None:
-        if not self.en_source:
-            return
-        self.autofix_btn.setText("Searching...")
-        self.autofix_btn.setEnabled(False)
-        self._fix_worker = AutoFixWorker(self.en_source)
-        self._fix_worker.fixed_ready.connect(self._on_auto_fixed)
-        start_worker(self._fix_worker)
-
-    def _on_auto_fixed(self, new_fa: str) -> None:
-        self.autofix_btn.setText("Auto-Fix")
-        self.autofix_btn.setEnabled(True)
-        if new_fa and "\u06cc\u0627\u0641\u062a \u0646\u0634\u062f" not in new_fa:
-            self._apply_new_persian(new_fa)
 
     def trigger_manual_edit(self) -> None:
         cur_val = "" if self._is_missing_translation() else self.real_text

@@ -12,9 +12,9 @@ import requests
 _DATA = tempfile.mkdtemp()
 os.environ["XDG_DATA_HOME"] = _DATA
 os.environ["APPDATA"] = _DATA
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lexicon_fixture import use_lexicon  # noqa: E402
 import lexical_engine as le  # noqa: E402
-import dictionary_sources as ds  # noqa: E402
 from ui.config import SettingsManager  # noqa: E402
 from ui.workers import SuggestionWorker  # noqa: E402
 
@@ -107,6 +107,7 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
     """With the switch on, no lookup entry point makes a request (or even tries to)."""
 
     def setUp(self):
+        use_lexicon(self)
         le.set_offline_only(True)
         self.addCleanup(le.set_offline_only, False)
         self.net = NetworkTripwire()
@@ -130,10 +131,6 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
         data = le.analyze_with_dictionaries("run")
         if HAS_WORDNET:
             self.assertTrue(data["senses"])  # WordNet still answers
-        self.assert_silent()
-
-    def test_deep_word_lookup(self):
-        le.analyze_with_dictionaries("serendipity", deep_mode=True)
         self.assert_silent()
 
     def test_bundled_idiom_lookup(self):
@@ -164,8 +161,10 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
 
     def test_persian_reverse_lookup_without_a_model(self):
         with mock.patch.object(le, "_ct2_translate", return_value=""):
-            data = le.analyze_persian(PERSIAN_WORD)
-        self.assertEqual(data["english_translation"], "")
+            word = le.analyze_persian(PERSIAN_WORD)
+            unknown = le.analyze_persian("زودگذر")
+        self.assertEqual(word["english_translation"], "book")  # the internal dictionary's translations work backwards
+        self.assertEqual(unknown["english_translation"], "")
         self.assert_silent()
 
     def test_suggestions_use_local_data_only(self):
@@ -184,23 +183,19 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
         self.assert_silent()
 
     def test_other_engine_entry_points(self):
-        self.assertEqual(le.fetch_wikipedia_persian_interlanguage_title("ice"), "")
         self.assertEqual(le.translate_via_clients5("hello"), "")
         self.assertEqual(le._google_fa_to_en(PERSIAN_WORD), ("", []))
-        self.assertTrue(le.fetch_verified_example_for_relation("brilliant", "Adjective"))  # a made-up one at worst
+        self.assertIn("bank", le.fetch_verified_example_for_relation("bank", "Noun").lower())  # WordNet's or the corpora's
         le.fetch_persian_word_meaning("zeitgeist")
         le.fetch_persian_word_meaning("under the weather", is_idiom=True)
         le.translate_batch_fast(["The cat sat on the mat today."], ["cat", "zeitgeist"])
-        with mock.patch.object(le, "record_user_override"):
-            le.auto_fix_translation_deep("zeitgeist")
+        self.assertEqual(le.translate_with_source("I love you.")[0], "دوستت دارم.")  # the local tier answers offline
         self.assert_silent()
 
-    def test_only_local_sources_are_active(self):
-        ctx = ds.LookupContext(term="run", offline=True)
-        active = [s.name for s in ds.REGISTRY.active(ctx)]
-        self.assertTrue(active)
-        for name in active:
-            self.assertFalse(ds.REGISTRY.get(name).needs_network, name)
+    def test_sentence_and_persian_lookups(self):
+        le.analyze_with_dictionaries("The bank was closed when we arrived there.")
+        le.analyze_with_dictionaries(PERSIAN_WORD)
+        self.assert_silent()
 
     def test_translation_goes_straight_to_the_offline_model(self):
         with mock.patch.object(le, "_ct2_translate", return_value="سلام") as ct2:
@@ -212,6 +207,7 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
 
 class OnlineModeUnchangedTest(unittest.TestCase):
     def test_lookup_still_tries_the_network_when_the_switch_is_off(self):
+        use_lexicon(self)
         with NetworkTripwire() as net, mock.patch.object(le, "wn", None), mock.patch.object(le, "LEMMATIZER", None):
             le.analyze_with_dictionaries("zeitgeist")
         self.assertIn("requests.Session.request", net.attempts)
