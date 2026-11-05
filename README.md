@@ -48,15 +48,16 @@ An English → Persian learner's dictionary.
 
 Type Persian in the search box to find English words. Ocean shows the English translation and clickable English candidates, from your history, your own fixes, Wiktionary's English–Persian translations and Google. Click a candidate to open its full English entry. Offline, the NLLB model translates sentences (lower quality).
 
-### Look up from any app (Ctrl+Alt+O)
+### Look up from any app (Ctrl+C twice, or Alt+Q)
 
-Select or copy text in any app, press **Ctrl+Alt+O**, and Ocean shows the lookup. On GNOME Wayland it may show an "Ocean is ready" notice instead of jumping to the front. Ocean runs as a single window: launching it again (or the shortcut) hands the request to the open window.
+With Ocean running, select text in any app and look it up without switching windows:
 
-- **Windows:** works automatically while Ocean is running (copy first, then press Ctrl+Alt+O).
-- **Linux (GNOME):** run `./install_shortcut_linux.sh` once (`--remove` to undo). If middle-click paste is off in GNOME, copy (Ctrl+C) first.
+- **Windows: press Ctrl+C twice.** Hold Ctrl and tap **C** two times within about half a second on the same selection (the first press copies as usual). Ocean comes to the front and shows the lookup. Nothing else changes: one Ctrl+C is an ordinary copy.
+- **Windows: Alt+Q** looks up whatever is on the clipboard (copy first). Use it if an app does not refresh the clipboard on the second copy. **Ctrl+Alt+O** keeps working as the older alternative. If another program already owns one of these keys, Ocean logs "Could not register …" in `ocean.log` and the other shortcuts still work.
+- **Linux (GNOME):** run `./install_shortcut_linux.sh` once to bind **Alt+Q** (and Ctrl+Alt+O) to the lookup; `--remove` undoes it. It reads the highlighted text, so no copy is needed; if middle-click paste is off in GNOME, copy (Ctrl+C) first. Ctrl+C twice is Windows-only: Wayland does not let a background app see other apps' clipboard changes.
 - **Other Linux desktops:** bind any key to `<ocean folder>/run.sh --lookup`.
 
-You can also run `run.sh --lookup <text>`.
+How "Ctrl+C twice" works: Ocean listens for clipboard changes, which Windows reports to every app, so it installs no keyboard hook (antivirus and game anti-cheat tools dislike those). A change counts only when Ctrl is held, Ocean did not write it, and it has text; two such changes with the same text, 0.08 to 0.6 seconds apart, trigger the lookup. Copies marked as secret by password managers are never read. Ocean runs as a single window: launching it again (or the shortcut) hands the request to the open window. On GNOME Wayland it may show an "Ocean is ready" notice instead of jumping to the front. You can also run `run.sh --lookup <text>`.
 
 ### Word level and frequency badges
 
@@ -155,7 +156,7 @@ Ocean says one of your saved words out loud, with the voice chosen in Settings, 
 
 Sort by **Most Recent** or **Most Looked Up**. The search and the sort both combine with **Saved Favorites Only**.
 
-Each lookup you make (typing a word, picking a suggestion, clicking a history row or candidate, the Ctrl+Alt+O hotkey) adds one to that word's counter, shown as ×2, ×3… beside it. Existing history starts at 1. Refresh, back/forward and re-showing a result do not count.
+Each lookup you make (typing a word, picking a suggestion, clicking a history row or candidate, the Ctrl+C twice / Alt+Q shortcut) adds one to that word's counter, shown as ×2, ×3… beside it. Existing history starts at 1. Refresh, back/forward and re-showing a result do not count.
 
 ### Export to Anki
 

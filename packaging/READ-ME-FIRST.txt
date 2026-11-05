@@ -13,8 +13,8 @@ USE
   - Click "Save" (star) on a word to add it to your review deck; review it
     from the "Review" button on the home screen (Space shows the answer,
     keys 1-4 grade it).
-  - Look up from any app: copy a word (Ctrl+C), then press Ctrl+Alt+O while
-    Ocean is running.
+  - Look up from any app: select a word and press Ctrl+C twice while Ocean
+    is running (or copy it and press Alt+Q).
   - Menu > History > Export to Anki makes a file you can import into Anki.
   - Menu > Pronounce reads any English text aloud with its IPA.
 

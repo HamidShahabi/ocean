@@ -395,7 +395,7 @@ class MainWindow(QMainWindow):
         self.input_box.setFocus()
 
     def handle_external_lookup(self, message: Dict[str, str]) -> None:
-        """A hand-off from `--lookup`, a second launch, or the Windows hotkey: show the window and look up."""
+        """A hand-off from `--lookup`, a second launch, or a Windows trigger (Ctrl+C twice, Alt+Q): show the window and look up."""
         token = message.get("token", "")
         if token:
             # Lets Wayland compositors grant focus to this already-running window (xdg-activation).
@@ -405,6 +405,8 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+        if sys.platform == "win32":
+            desktop_lookup.focus_window(int(self.winId()))  # a clipboard change is no input event: Windows would only flash
         if message.get("action") != "lookup":
             return
         text = message.get("text", "")
@@ -415,7 +417,7 @@ class MainWindow(QMainWindow):
             log.info("External lookup of %d chars", len(text))
             self._analyze_input(force_refresh=False, override_term=text)
         else:
-            self.status_label.setText("Nothing selected: copy a word, then press the shortcut")
+            self.status_label.setText(f"Nothing copied: select a word, then press {desktop_lookup.HOTKEY_LABEL}")
 
     def open_review(self) -> None:
         self.sug_popup.hide()
