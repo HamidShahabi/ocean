@@ -417,7 +417,7 @@ class MainWindow(QMainWindow):
             log.info("External lookup of %d chars", len(text))
             self._analyze_input(force_refresh=False, override_term=text)
         else:
-            self.status_label.setText(f"Nothing copied: select a word, then press {desktop_lookup.HOTKEY_LABEL}")
+            self.status_label.setText(f"Nothing selected: copy a word, then press {desktop_lookup.HOTKEY_LABEL}")
 
     def open_review(self) -> None:
         self.sug_popup.hide()
