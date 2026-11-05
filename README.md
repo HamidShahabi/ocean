@@ -74,9 +74,9 @@ English results show two small badges under the headword:
 
 Hover a badge for the details. Learn the A1–B1 words first; the higher levels and rare words can wait. See [Word list credits](#word-list-credits) for where the levels come from.
 
-### Read examples aloud
+### Read aloud
 
-The speaker button next to an example sentence reads it aloud and highlights each word as it is spoken. With the Kokoro neural voice the highlight follows an estimate of each word's timing (the voice gives no word timestamps), so it can be slightly off on long or unusual words. The fallback voices (Windows SAPI, or spd-say / espeak on Linux) play the sentence without highlighting. Playing another clip clears the highlight.
+The speaker button next to a word, phrase or example sentence reads it aloud, with the voice and speed chosen in Settings. Ocean prepares the audio of the buttons on a page in the background as soon as the page appears, so a click starts the sound at once; a clip it has not prepared yet (a very long text, or a click within a second of start-up) takes about a second to make first. A click on another button cuts the current clip off. The fallback voices (Windows SAPI, or spd-say / espeak on Linux) are used when the Kokoro voice is missing.
 
 ### Reader
 
@@ -169,7 +169,7 @@ Each lookup you make (typing a word, picking a suggestion, clicking a history ro
 
 ### Voice
 
-Pronunciation uses the Kokoro neural voice. The setup script downloads the small int8 model (`kokoro-v1.0.int8.onnx`, ~88 MB). If you already have the full-size `kokoro-v1.0.onnx` (~310 MB) next to the app it keeps working, but the int8 file is preferred when both are present. Delete the full-size file to save space.
+Pronunciation uses the Kokoro neural voice. The setup script downloads the small int8 model (`kokoro-v1.0.int8.onnx`, ~88 MB). If you already have the full-size `kokoro-v1.0.onnx` (~310 MB) next to the app it keeps working, but the int8 file is preferred when both are present. Delete the full-size file to save space. Speech speed is about the same with either model (the int8 one loads faster), so the model choice does not change how soon a click is heard.
 
 The int8 model has not had a side-by-side listening test against the full-size one. If you hear a difference, delete `kokoro-v1.0.int8.onnx` and download `kokoro-v1.0.onnx` from the same release: Ocean then uses the full-size model.
 

@@ -7,7 +7,6 @@ from PyQt6.QtGui import QCursor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 import lexical_engine
-from ui.highlight import ExampleHighlighter
 from ui.widgets import SmoothGlassFrame
 from ui.workers import start_worker
 
@@ -46,7 +45,6 @@ class PronouncePage(QWidget):
         self.main_win = main_win
         self.worker: Optional[IpaWorker] = None
         self.text = ""
-        self.highlighter = ExampleHighlighter(main_win.speaker)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 24)
@@ -131,7 +129,7 @@ class PronouncePage(QWidget):
         speaker = self.main_win.speaker
         if speaker.has_voice():
             self.status.setText("")
-            self.highlighter.speak(self.text_label, text)  # highlights each word as it is spoken (Kokoro)
+            speaker.speak(text)
         elif speaker.is_loading():
             self.status.setText("The voice is still loading; press Pronounce again in a moment.")
         else:
@@ -145,7 +143,6 @@ class PronouncePage(QWidget):
             self.ipa_label.setText(f"US  {ipa}" if ipa else "")
 
     def stop(self) -> None:
-        self.highlighter.clear()
         self.main_win.speaker.stop()
 
     def hideEvent(self, event) -> None:

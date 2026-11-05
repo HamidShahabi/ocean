@@ -1,5 +1,5 @@
 """Reusable glass-style widgets shared by the pages: frames, dialogs, popups, dropdowns, buttons."""
-from typing import Callable, List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QPoint, QRectF, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen
@@ -366,9 +366,10 @@ class PersianTranslationWidget(QWidget):
         super().enterEvent(event)
 
 
-def create_audio_button(text_to_speak: str, speaker: NeuralSpeaker, settings: SettingsManager,
-                        on_click: Optional[Callable[[], None]] = None) -> QPushButton:
-    """Speaker button for `text_to_speak`; `on_click` replaces the default of just speaking it."""
+def create_audio_button(text_to_speak: str, speaker: NeuralSpeaker, settings: SettingsManager) -> QPushButton:
+    """Speaker button for `text_to_speak`. The clip is synthesized in the background right away, so the click
+    plays it at once."""
+    speaker.prefetch(text_to_speak)
     is_dark = settings.data.get("theme", "Dark Mode") == "Dark Mode"
     icon_col = "#FFFFFF" if is_dark else "#0B57D0"
     btn = QPushButton()
@@ -379,8 +380,5 @@ def create_audio_button(text_to_speak: str, speaker: NeuralSpeaker, settings: Se
     btn.setFixedSize(34, 34)
     btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
     btn.setToolTip(f"Listen: {text_to_speak}")
-    if on_click is not None:
-        btn.clicked.connect(lambda _: on_click())
-    else:
-        btn.clicked.connect(lambda _, t=text_to_speak: speaker.speak(t))
+    btn.clicked.connect(lambda _, t=text_to_speak: speaker.speak(t))
     return btn
