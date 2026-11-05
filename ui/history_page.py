@@ -1,32 +1,24 @@
-"""Drawer page listing past lookups: favourite toggling, deleting, re-opening and Anki export."""
-import logging
-import os
+"""Drawer page listing past lookups: favourite toggling, deleting and re-opening."""
 from typing import Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QSize, QStandardPaths, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-import anki_export
-import storage
 from ui.widgets import ModernGlassDropdown, SmoothGlassFrame
 
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
-
-log = logging.getLogger("ocean.app")
 
 
 class HistoryItemRowWidget(QWidget):
@@ -35,7 +27,7 @@ class HistoryItemRowWidget(QWidget):
     star_toggled = pyqtSignal(str, object)
     term_clicked = pyqtSignal(str)
 
-    def __init__(self, query_key: str, display_term: str, is_fav: bool, lookup_count: int = 1) -> None:
+    def __init__(self, query_key: str, display_term: str, is_fav: bool) -> None:
         super().__init__()
         self.query_key = query_key
         self.is_fav = is_fav
@@ -58,12 +50,6 @@ class HistoryItemRowWidget(QWidget):
         self.term_lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         lay.addWidget(self.term_lbl, 1)
 
-        if lookup_count > 1:
-            self.count_lbl = QLabel(f"\u00d7{lookup_count}")
-            self.count_lbl.setObjectName("MutedText")
-            self.count_lbl.setToolTip(f"Looked up {lookup_count} times")
-            lay.addWidget(self.count_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
-
     def set_favorite_visual(self, fav: bool) -> None:
         self.is_fav = fav
         self.star_btn.setText("\u2605" if fav else "\u2606")
@@ -77,7 +63,7 @@ class HistoryItemRowWidget(QWidget):
         super().mouseReleaseEvent(event)
 
 
-SORT_OPTIONS = {"Most Recent": storage.SORT_RECENT, "Most Looked Up": storage.SORT_MOST_LOOKED_UP}
+FILTER_ALL = "All Recent Searches"
 
 
 class HistoryPage(QWidget):
@@ -102,12 +88,9 @@ class HistoryPage(QWidget):
         self._search_timer.timeout.connect(self.populate)
         self.search_box.textChanged.connect(lambda _: self._search_timer.start())
 
-        self.filter_drop = ModernGlassDropdown(["All Recent Searches", "Saved Favorites Only"], "All Recent Searches", self)
+        self.filter_drop = ModernGlassDropdown([FILTER_ALL, "Saved Favorites Only"], FILTER_ALL, self)
         self.filter_drop.valueChanged.connect(lambda _: self.populate())
-        self.sort_drop = ModernGlassDropdown(list(SORT_OPTIONS), "Most Recent", self)
-        self.sort_drop.valueChanged.connect(lambda _: self.populate())
         h_lay.addWidget(self.filter_drop)
-        h_lay.addWidget(self.sort_drop)
 
         list_box = SmoothGlassFrame(radius=16, variant="inner")
         lb_lay = QVBoxLayout(list_box)
@@ -126,29 +109,19 @@ class HistoryPage(QWidget):
         del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         del_btn.clicked.connect(self._delete_hist_item)
 
-        export_btn = QPushButton("Export to Anki")
-        export_btn.setObjectName("GlassPillButton")
-        export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        export_btn.setFixedHeight(36)
-        export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        export_btn.setToolTip("Export the entries listed above as an Anki import file")
-        export_btn.clicked.connect(self._export_anki)
-
-        hist_btns = QHBoxLayout()
-        hist_btns.setSpacing(10)
-        hist_btns.addWidget(del_btn, stretch=1)
-        hist_btns.addWidget(export_btn, stretch=1)
-        h_lay.addLayout(hist_btns)
+        h_lay.addWidget(del_btn)
 
     def on_show(self) -> None:
         self.populate()
 
+    def _favorites_only(self) -> bool:
+        return self.filter_drop.currentText() != FILTER_ALL
+
     def _current_entries(self):
-        """Entries for the current search text, 'Saved only' filter and sort order."""
+        """Entries for the current search text and favourites filter."""
         return self.main_win.db.list_entries(
-            favorites_only="Saved" in self.filter_drop.currentText(),
+            favorites_only=self._favorites_only(),
             query=self.search_box.text(),
-            sort=SORT_OPTIONS[self.sort_drop.currentText()],
         )
 
     def populate(self) -> None:
@@ -162,7 +135,7 @@ class HistoryPage(QWidget):
             lw = QListWidgetItem()
             lw.setData(Qt.ItemDataRole.UserRole, item["query_key"])
             lw.setSizeHint(QSize(0, row_h))
-            row_w = HistoryItemRowWidget(item["query_key"], disp, item["is_favorite"], item["lookup_count"])
+            row_w = HistoryItemRowWidget(item["query_key"], disp, item["is_favorite"])
             row_w.star_toggled.connect(self._on_row_star_toggled)
             row_w.term_clicked.connect(self._on_row_term_clicked)
             self.hist_list.addItem(lw)
@@ -170,9 +143,7 @@ class HistoryPage(QWidget):
 
     def _on_row_star_toggled(self, key: str, row_widget: Optional[HistoryItemRowWidget] = None) -> None:
         new_state = self.main_win.db.toggle_favorite(key)
-        self.main_win.refresh_review_badges()
-        fav_only = "Saved" in self.filter_drop.currentText()
-        if fav_only and not new_state:
+        if self._favorites_only() and not new_state:
             scroll_pos = self.hist_list.verticalScrollBar().value()
             self.populate()
             QTimer.singleShot(5, lambda: self.hist_list.verticalScrollBar().setValue(scroll_pos))
@@ -194,30 +165,4 @@ class HistoryPage(QWidget):
             key = item.data(Qt.ItemDataRole.UserRole)
             if key:
                 self.main_win.db.delete_entry(key)
-                self.main_win.refresh_review_badges()
                 self.populate()
-
-    def _export_anki(self) -> None:
-        db = self.main_win.db
-        payloads = [p for p in (db.get_entry(e["query_key"]) for e in self._current_entries()) if p]
-        if not payloads:
-            QMessageBox.information(self, "Ocean Notice", "Nothing to export yet.")
-            return
-        docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation) or os.path.expanduser("~")
-        path, _ = QFileDialog.getSaveFileName(self, "Export to Anki", os.path.join(docs, "Ocean-anki.txt"), "Text files (*.txt)")
-        if not path:
-            return
-        text, count = anki_export.build_anki_tsv(payloads)
-        try:
-            with open(path, "w", encoding="utf-8", newline="") as f:
-                f.write(text)
-        except OSError as exc:
-            log.exception("Anki export to %s failed", path)
-            QMessageBox.warning(self, "Ocean Notice", f"Could not write the export file:\n{exc}")
-            return
-        QMessageBox.information(
-            self, "Ocean",
-            f"Exported {count} notes to:\n{path}\n\n"
-            f"In Anki choose File \u2192 Import and pick this file. Notes go into the "
-            f"\u201c{anki_export.DECK_NAME}\u201d deck; importing again later updates them.",
-        )

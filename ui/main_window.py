@@ -1,10 +1,9 @@
 """The main window: top bar, home page and navigation. It wires the pages together; the pages
-themselves live in results_page.py, review_page.py, quiz_page.py, reader_page.py, pronounce_page.py and drawer.py (history, settings, Teach Ocean)."""
+themselves live in results_page.py and drawer.py (history, settings)."""
 import logging
 import os
 import re
 import sys
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QEvent, QObject, QPoint, QSize, QTimer
@@ -30,10 +29,6 @@ from ui import theme
 from ui.config import DB_FILE, SettingsManager
 from ui.drawer import AttachedRightDrawer
 from ui.results_page import ResultsPage
-from ui.quiz_page import QuizPage
-from ui.pronounce_page import PronouncePage
-from ui.reader_page import ReaderPage
-from ui.review_page import ReviewPage
 from ui.speaker import NeuralSpeaker
 from ui.theme import THEME_COLORS, VectorIcons
 from ui.widgets import GlassPopupMenu, GlassSuggestionPopup, PersianTranslationWidget, SmoothGlassFrame
@@ -50,8 +45,6 @@ class MainWindow(QMainWindow):
         self.resize(1220, 850)
 
         self.settings = SettingsManager()
-        self.settings.apply_sources()
-        lexical_engine.set_offline_only(bool(self.settings.data.get("offline_only")))
         self.db = storage.HistoryStore(DB_FILE)
         self.speaker = NeuralSpeaker(self.settings)
         self.current_term: Optional[str] = None
@@ -69,12 +62,6 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._apply_theme()
-        self.refresh_review_badges()
-        # Cards fall due while the app stays open (e.g. 10 minutes after "Again").
-        self.review_badge_timer = QTimer(self)
-        self.review_badge_timer.setInterval(60_000)
-        self.review_badge_timer.timeout.connect(self.refresh_review_badges)
-        self.review_badge_timer.start()
 
         QApplication.instance().installEventFilter(self)
 
@@ -275,38 +262,6 @@ class MainWindow(QMainWindow):
         sb_wrap_lay.addWidget(self.search_card)
         self.home_vbox.addWidget(self.search_bar_wrapper, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        self.home_review_btn = QPushButton("")
-        self.home_review_btn.setObjectName("GlassPillButton")
-        self.home_review_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.home_review_btn.setFixedHeight(36)
-        self.home_review_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.home_review_btn.setToolTip("Review your saved words (spaced repetition)")
-        self.home_review_btn.clicked.connect(self.open_review)
-
-        self.home_quiz_btn = QPushButton("Quiz")
-        self.home_quiz_btn.setObjectName("GlassPillButton")
-        self.home_quiz_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.home_quiz_btn.setFixedHeight(36)
-        self.home_quiz_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.home_quiz_btn.setToolTip("Quiz yourself on your saved words")
-        self.home_quiz_btn.clicked.connect(self.open_quiz)
-
-        self.home_reader_btn = QPushButton("Reader")
-        self.home_reader_btn.setObjectName("GlassPillButton")
-        self.home_reader_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.home_reader_btn.setFixedHeight(36)
-        self.home_reader_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.home_reader_btn.setToolTip("Paste a text and read it, looking up words as you go")
-        self.home_reader_btn.clicked.connect(self.open_reader)
-
-        home_actions = QHBoxLayout()
-        home_actions.setSpacing(12)
-        home_actions.addStretch(1)
-        home_actions.addWidget(self.home_review_btn)
-        home_actions.addWidget(self.home_quiz_btn)
-        home_actions.addWidget(self.home_reader_btn)
-        home_actions.addStretch(1)
-        self.home_vbox.addLayout(home_actions)
         self.home_vbox.addStretch(1)
 
         self.stack.addWidget(self.home_page)
@@ -314,22 +269,6 @@ class MainWindow(QMainWindow):
         # VIEW 1: Results Page
         self.results_page = ResultsPage(self)
         self.stack.addWidget(self.results_page)
-
-        # VIEW 2: Spaced-repetition review
-        self.review_page = ReviewPage(self)
-        self.stack.addWidget(self.review_page)
-
-        # VIEW 3: Quiz on saved words
-        self.quiz_page = QuizPage(self)
-        self.stack.addWidget(self.quiz_page)
-
-        # VIEW 4: Reader (paste a text, click words to look them up)
-        self.reader_page = ReaderPage(self)
-        self.stack.addWidget(self.reader_page)
-
-        # VIEW 5: Pronounce (read a text aloud with its IPA, no translation)
-        self.pronounce_page = PronouncePage(self)
-        self.stack.addWidget(self.pronounce_page)
 
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)
@@ -391,7 +330,6 @@ class MainWindow(QMainWindow):
         self.home_vbox.insertWidget(2, self.search_bar_wrapper, alignment=Qt.AlignmentFlag.AlignHCenter)
         self.stack.setCurrentIndex(0)
         self._update_search_button_mode()
-        self.refresh_review_badges()
         self.input_box.setFocus()
 
     def handle_external_lookup(self, message: Dict[str, str]) -> None:
@@ -416,46 +354,6 @@ class MainWindow(QMainWindow):
             self._analyze_input(force_refresh=False, override_term=text)
         else:
             self.status_label.setText("Nothing selected: copy a word, then press the shortcut")
-
-    def open_review(self) -> None:
-        self.sug_popup.hide()
-        self.right_drawer.hide()
-        self.status_label.setText("")
-        self.review_page.start()
-        self.stack.setCurrentIndex(2)
-        self.review_page.setFocus()
-
-    def open_quiz(self) -> None:
-        self.sug_popup.hide()
-        self.right_drawer.hide()
-        self.status_label.setText("")
-        self.quiz_page.start()
-        self.stack.setCurrentIndex(3)
-        self.quiz_page.setFocus()
-
-    def open_reader(self) -> None:
-        self.sug_popup.hide()
-        self.right_drawer.hide()
-        self.status_label.setText("")
-        self.reader_page.start()
-        self.stack.setCurrentIndex(4)
-
-    def open_pronounce(self) -> None:
-        self.sug_popup.hide()
-        self.right_drawer.hide()
-        self.status_label.setText("")
-        self.stack.setCurrentIndex(5)
-        self.pronounce_page.start()
-
-    def refresh_review_badges(self) -> None:
-        try:
-            due = self.review_page.store.due_count(datetime.now())
-        except Exception:
-            log.exception("Could not count due reviews")
-            due = 0
-        self.home_review_btn.setText(f"Review · {due} due")
-        self.home_review_btn.setVisible(due > 0)
-        self.right_drawer.review_menu_btn.setText(f"Review ({due} due)" if due else "Review")
 
     def _switch_to_results_view(self) -> None:
         if self.stack.currentIndex() != 1:
@@ -505,8 +403,8 @@ class MainWindow(QMainWindow):
         self._switch_to_results_view()
 
         if not force_refresh and not self._navigating_history:
-            # A user-initiated lookup (cached or fresh) counts once; refreshes and back/forward do not.
-            self.db.record_lookup(term)
+            # A user-initiated lookup (cached or fresh) goes to the top of the history; refreshes and back/forward do not.
+            self.db.touch_entry(term)
         self._stale_copy = None
         if not force_refresh:
             cached = self.db.get_entry(term)
@@ -519,7 +417,6 @@ class MainWindow(QMainWindow):
                 self.explore_btn.setEnabled(True)
                 self.current_term = term
                 self.current_data = cached
-                cached["_from_history"] = True  # the offline-only notice says so
                 self.results_page.render(term, cached)
                 self.status_label.setText("")
                 return
@@ -537,10 +434,8 @@ class MainWindow(QMainWindow):
         start_worker(self.worker)
 
     def _should_refresh(self, cached: Dict[str, Any]) -> bool:
-        """A saved entry older than the Settings refresh period (or from an older engine) is fetched again,
-        unless offline-only mode is on."""
-        if self.settings.data.get("offline_only"):
-            return False
+        """A saved entry older than the Settings refresh period (or from an older engine) is fetched again
+        (if that fails, e.g. without internet, the saved copy is shown)."""
         days = storage.refresh_period_days(self.settings.data.get("refresh_period"))
         return self.db.is_entry_stale(cached, days)
 
@@ -613,6 +508,5 @@ class MainWindow(QMainWindow):
 
         self.setStyleSheet(qss)
         self.sug_popup.setStyleSheet(qss)
-        self.reader_page.apply_theme()  # its marks are colours, not part of the style sheet
         self.right_drawer.update()
         self.update()

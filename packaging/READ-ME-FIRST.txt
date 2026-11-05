@@ -10,13 +10,10 @@ START
 USE
   - Type an English word, idiom or sentence and press Enter.
   - Click the speaker buttons to hear pronunciation.
-  - Click "Save" (star) on a word to add it to your review deck; review it
-    from the "Review" button on the home screen (Space shows the answer,
-    keys 1-4 grade it).
+  - Click "Save" (star) on a word to keep it in your saved words (Menu >
+    History > Saved Favorites Only).
   - Look up from any app: copy a word (Ctrl+C), then press Ctrl+Alt+O while
     Ocean is running.
-  - Menu > History > Export to Anki makes a file you can import into Anki.
-  - Menu > Pronounce reads any English text aloud with its IPA.
 
 Works offline: the dictionary is on your computer. Without internet, Persian
 the dictionary doesn't have comes from an offline translator (lower quality).

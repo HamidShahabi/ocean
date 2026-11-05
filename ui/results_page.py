@@ -2,7 +2,7 @@
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QFrame,
@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-import dictionary_sources
 import lexical_engine
 from ui.highlight import ExampleHighlighter
 from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS
@@ -25,21 +24,8 @@ if TYPE_CHECKING:
     from ui.main_window import MainWindow
 
 
-
-def offline_badge_text(data: Dict[str, Any]) -> str:
-    """The offline-only notice, saying where this result came from."""
-    if data.get("_from_history"):
-        where = "your history (saved lookup)"
-    elif data.get("persian_source") in (lexical_engine.FA_SOURCE_SLM, lexical_engine.FA_SOURCE_NLLB):
-        where = f"Ocean's internal dictionary; Persian by the {data['persian_source']}"
-    else:
-        where = "Ocean's internal dictionary"
-    return f"Offline-only mode \u2014 result from {where}"
-
 class ResultsPage(QWidget):
     """Renders a lookup payload (word, idiom, sentence or Persian input) as a stack of cards."""
-
-    favorite_toggled = pyqtSignal(str, bool)  # (term, now saved): the Reader re-marks its text on this
 
     def __init__(self, main_win: "MainWindow") -> None:
         super().__init__()
@@ -314,24 +300,8 @@ class ResultsPage(QWidget):
         self.cards_layout.addWidget(card)
         self.cards_layout.addStretch()
 
-    def _add_all_sources_off_notice(self) -> None:
-        """Explain the empty definitions when every dictionary source is switched off in Settings
-        (a separate case from offline-only mode, which leaves the bundled sources on)."""
-        card, vbox, _ = self._create_glass_card("All dictionary sources are turned off")
-        msg = QLabel("No dictionary source was used for this word, so there are no definitions, synonyms or examples. "
-                     "Turn some back on under Menu > Settings > Dictionary sources.")
-        msg.setObjectName("BodyText")
-        msg.setWordWrap(True)
-        vbox.addWidget(msg)
-        self.cards_layout.addWidget(card)
-
     def render(self, query_term: str, data: Dict[str, Any]) -> None:
         self._clear_cards()
-        if lexical_engine.is_offline_only():
-            badge = QLabel(offline_badge_text(data))
-            badge.setObjectName("OfflineBadge")
-            badge.setWordWrap(True)
-            self.cards_layout.addWidget(badge)
         if data.get("is_reverse"):
             self._render_reverse_result(query_term, data)
             return
@@ -355,9 +325,6 @@ class ResultsPage(QWidget):
             dym_btn.clicked.connect(lambda _, w=did_you_mean: self.main_win._analyze_input(False, w))
             self.cards_layout.addWidget(dym_btn)
 
-        if not is_sentence and not senses and not dictionary_sources.REGISTRY.any_enabled():
-            self._add_all_sources_off_notice()
-
         # --- SECTION 1: Overview & Definitions ---
         card1_title = "1. Sentence Analysis & Translation" if is_sentence else "1. Overview & Definitions"
         card1, vbox1, header1 = self._create_glass_card(card1_title)
@@ -377,9 +344,7 @@ class ResultsPage(QWidget):
         def _toggle_fav() -> None:
             new_state = self.main_win.db.toggle_favorite(query_term)
             fav_btn.setText("\u2605 Saved" if new_state else "\u2606 Save")
-            self.main_win.refresh_review_badges()
             self.main_win.right_drawer.refresh_history()
-            self.favorite_toggled.emit(query_term, new_state)
 
         fav_btn.clicked.connect(_toggle_fav)
         header1.addWidget(fav_btn)

@@ -35,7 +35,7 @@ class HistoryStoreTest(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(cols[:6], ["id", "query_key", "display_term", "payload", "is_favorite", "updated_at"])
-        self.assertIn("lookup_count", cols)
+        self.assertNotIn("lookup_count", cols)
         self.assertIn("produced_at", cols)
         self.assertIn("engine_version", cols)
         self.assertEqual(mode, "wal")
@@ -99,18 +99,9 @@ class HistoryStoreTest(unittest.TestCase):
         everything = self.store.list_entries()
         self.assertEqual([e["query_key"] for e in everything], ["new", "mid", "old"])
         self.assertEqual(everything[0], {"query_key": "new", "display_term": "new",
-                                         "is_favorite": True, "updated_at": "2026-01-03T00:00:00",
-                                         "lookup_count": 1})
+                                         "is_favorite": True, "updated_at": "2026-01-03T00:00:00"})
         self.assertFalse(everything[1]["is_favorite"])
         self.assertEqual([e["query_key"] for e in self.store.list_entries(favorites_only=True)], ["new", "old"])
-
-    def test_favorite_entries_returns_saved_payloads_only(self):
-        self.store.save_entry("book", {"headword": "book", "persian_equivalent": "کتاب"})
-        self.store.save_entry("tree", {"headword": "tree"})
-        self.store.toggle_favorite("book")
-        self.assertEqual(self.store.favorite_entries(), [
-            {"query_key": "book", "display_term": "book", "payload": {"headword": "book", "persian_equivalent": "کتاب"}},
-        ])
 
     def test_english_entries_with_persian_matches_any_part(self):
         self.store.save_entry("ephemeral", {"headword": "ephemeral", "persian_equivalent": f"{PASSING}، {FLEETING}"})
@@ -187,7 +178,7 @@ class HistorySearchAndSortTest(unittest.TestCase):
 
     # migration
 
-    def test_old_schema_database_is_migrated_and_entries_start_at_one(self):
+    def test_old_schema_database_still_loads(self):
         path = os.path.join(self._dir.name, "old.db")
         conn = sqlite3.connect(path)
         with conn:
@@ -196,51 +187,57 @@ class HistorySearchAndSortTest(unittest.TestCase):
                          "VALUES ('sea', 'sea', '{\"headword\": \"sea\"}', 1, '2026-01-01T00:00:00')")
         conn.close()
         store = storage.HistoryStore(path)
-        entries = store.list_entries()
-        self.assertEqual([(e["query_key"], e["lookup_count"], e["is_favorite"]) for e in entries],
-                         [("sea", 1, True)])
+        self.assertEqual([(e["query_key"], e["is_favorite"]) for e in store.list_entries()], [("sea", True)])
         self.assertEqual(store.get_entry("sea")["headword"], "sea")
 
-    def test_migration_is_idempotent_and_keeps_counts(self):
+    def test_database_with_the_old_counter_column_and_reviews_table_still_works(self):
+        path = os.path.join(self._dir.name, "counted.db")
+        conn = sqlite3.connect(path)
+        with conn:
+            conn.execute(self.OLD_SCHEMA)
+            conn.execute("ALTER TABLE lexicon ADD COLUMN lookup_count INTEGER NOT NULL DEFAULT 1")
+            conn.execute("CREATE TABLE reviews (query_key TEXT PRIMARY KEY, reps INTEGER)")
+            conn.execute("INSERT INTO lexicon (query_key, display_term, payload, is_favorite, updated_at, lookup_count) "
+                         "VALUES ('sea', 'sea', '{\"headword\": \"sea\"}', 1, '2026-01-01T00:00:00', 7)")
+        conn.close()
+        store = storage.HistoryStore(path)
+        store.save_entry("sky", {"headword": "sky"})  # inserting works without the column
+        store.save_entry("sea", {"headword": "sea", "v": 2})
+        self.assertEqual(sorted(e["query_key"] for e in store.list_entries()), ["sea", "sky"])
+        self.assertTrue(store.get_entry("sea")["_is_favorite"])
+        conn = sqlite3.connect(path)
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        finally:
+            conn.close()
+        self.assertNotIn("reviews", tables)  # the removed Review feature's table is cleaned up
+
+    def test_migration_is_idempotent_and_adds_no_counter_column(self):
         self.store.save_entry("sea", {"headword": "sea"})
-        self.store.record_lookup("sea")
         reopened = storage.HistoryStore(self.db_path)
         storage.HistoryStore(self.db_path)
-        self.assertEqual(reopened.list_entries()[0]["lookup_count"], 2)
+        self.assertEqual(len(reopened.list_entries()), 1)
         cols = [r[1] for r in self._sql("PRAGMA table_info(lexicon)")]
-        self.assertEqual(cols.count("lookup_count"), 1)
+        self.assertEqual(cols.count("produced_at"), 1)
+        self.assertNotIn("lookup_count", cols)
 
     def test_migration_coexists_with_other_added_columns(self):
         self._sql("ALTER TABLE lexicon ADD COLUMN some_future_column TEXT")
         self.store.save_entry("sea", {"headword": "sea"})
         reopened = storage.HistoryStore(self.db_path)
-        self.assertEqual(reopened.list_entries()[0]["lookup_count"], 1)
+        self.assertEqual(reopened.list_entries()[0]["query_key"], "sea")
 
-    # counter
+    # recency
 
-    def test_new_entry_starts_at_one_and_save_entry_never_changes_the_count(self):
-        self.store.save_entry("sea", {"headword": "sea"})
-        self.assertEqual(self.store.list_entries()[0]["lookup_count"], 1)
-        self.store.save_entry("sea", {"headword": "Sea", "v": 2})  # refresh / re-save
-        self.assertEqual(self.store.list_entries()[0]["lookup_count"], 1)
-
-    def test_record_lookup_increments_and_survives_a_resave(self):
-        self.store.save_entry("sea", {"headword": "sea"})
-        self.store.record_lookup(" SEA ")
-        self.store.record_lookup("sea")
-        self.assertEqual(self.store.list_entries()[0]["lookup_count"], 3)
-        self.store.save_entry("sea", {"headword": "sea", "v": 2})
-        self.assertEqual(self.store.list_entries()[0]["lookup_count"], 3)
-
-    def test_record_lookup_of_an_unknown_term_stores_nothing(self):
-        self.store.record_lookup("never saved")
-        self.assertEqual(self.store.list_entries(), [])
-
-    def test_record_lookup_moves_the_entry_to_the_top_of_recent(self):
+    def test_touch_entry_moves_the_entry_to_the_top_of_recent(self):
         self._populate()
         self.assertEqual(self._keys()[0], "moon")
-        self.store.record_lookup("sea")
+        self.store.touch_entry(" SEA ")
         self.assertEqual(self._keys()[0], "sea")
+
+    def test_touch_entry_of_an_unknown_term_stores_nothing(self):
+        self.store.touch_entry("never saved")
+        self.assertEqual(self.store.list_entries(), [])
 
     # search
 
@@ -279,38 +276,15 @@ class HistorySearchAndSortTest(unittest.TestCase):
         self.assertEqual(self._keys(query="bad"), ["bad"])
         self.assertEqual(self._keys(query="دریا"), [])
 
-    # sort
-
-    def test_sort_most_looked_up(self):
-        self._populate()
-        self.store.record_lookup("sky")
-        self.store.record_lookup("sky")
-        self.store.record_lookup("sea")
-        self._stamp("sky", "2026-01-02T00:00:00")
-        self._stamp("sea", "2026-01-01T00:00:00")
-        self.assertEqual(self._keys(sort=storage.SORT_MOST_LOOKED_UP), ["sky", "sea", "moon"])
-        self.assertEqual(self._keys(sort=storage.SORT_RECENT), ["moon", "sky", "sea"])
-        self.assertEqual(self._keys(), ["moon", "sky", "sea"])  # recent is the default
-
-    def test_equal_counts_sort_newest_first(self):
-        self._populate()
-        self.assertEqual(self._keys(sort=storage.SORT_MOST_LOOKED_UP), ["moon", "sky", "sea"])
-
     # combined with the favourites filter
 
-    def test_search_and_sort_combine_with_the_favourites_filter(self):
+    def test_search_combines_with_the_favourites_filter(self):
         self._populate()
-        self.store.record_lookup("sea")
-        self.store.record_lookup("sky")
-        self.store.record_lookup("sky")
-        self._stamp("sea", "2026-01-01T00:00:00")
         self.assertEqual(self._keys(favorites_only=True), ["moon", "sea"])
-        self.assertEqual(self._keys(favorites_only=True, sort=storage.SORT_MOST_LOOKED_UP), ["sea", "moon"])
         self.assertEqual(self._keys(favorites_only=True, query="دریا"), ["sea"])
         self.assertEqual(self._keys(favorites_only=True, query="sky"), [])  # sky is not saved
-        self.assertEqual(self._keys(favorites_only=True, query="o", sort=storage.SORT_MOST_LOOKED_UP), ["moon"])
+        self.assertEqual(self._keys(favorites_only=True, query="o"), ["moon"])
         self.assertEqual(self._keys(query="sky"), ["sky"])
-        self.assertEqual(self._keys(sort=storage.SORT_MOST_LOOKED_UP)[0], "sky")
 
 
 class ConnectionHandlingTest(unittest.TestCase):

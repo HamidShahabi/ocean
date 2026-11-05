@@ -1,4 +1,4 @@
-"""The attached right-hand drawer: a menu plus the history, settings and Teach Ocean pages."""
+"""The attached right-hand drawer: a menu plus the history and settings pages."""
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QSize
@@ -7,14 +7,13 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedWidget, QV
 
 from ui.history_page import HistoryPage
 from ui.settings_page import SettingsPage
-from ui.teach_page import TeachPage
 from ui.theme import VectorIcons
 from ui.widgets import SmoothGlassFrame
 
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
 
-PAGE_MENU, PAGE_HISTORY, PAGE_SETTINGS, PAGE_TEACH = 0, 1, 2, 3
+PAGE_MENU, PAGE_HISTORY, PAGE_SETTINGS = 0, 1, 2
 
 
 class AttachedRightDrawer(SmoothGlassFrame):
@@ -56,38 +55,6 @@ class AttachedRightDrawer(SmoothGlassFrame):
         m_lay.setContentsMargins(0, 8, 0, 0)
         m_lay.setSpacing(10)
 
-        self.review_menu_btn = QPushButton("Review")
-        self.review_menu_btn.setObjectName("DrawerMenuItem")
-        self.review_menu_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.review_menu_btn.setFixedHeight(46)
-        self.review_menu_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.review_menu_btn.clicked.connect(lambda: self.main_win.open_review())
-        m_lay.addWidget(self.review_menu_btn)
-
-        btn_quiz = QPushButton("Quiz")
-        btn_quiz.setObjectName("DrawerMenuItem")
-        btn_quiz.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_quiz.setFixedHeight(46)
-        btn_quiz.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_quiz.clicked.connect(lambda: self.main_win.open_quiz())
-        m_lay.addWidget(btn_quiz)
-
-        btn_reader = QPushButton("Reader")
-        btn_reader.setObjectName("DrawerMenuItem")
-        btn_reader.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_reader.setFixedHeight(46)
-        btn_reader.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_reader.clicked.connect(lambda: self.main_win.open_reader())
-        m_lay.addWidget(btn_reader)
-
-        btn_pronounce = QPushButton("Pronounce")
-        btn_pronounce.setObjectName("DrawerMenuItem")
-        btn_pronounce.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_pronounce.setFixedHeight(46)
-        btn_pronounce.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_pronounce.clicked.connect(lambda: self.main_win.open_pronounce())
-        m_lay.addWidget(btn_pronounce)
-
         btn_hist = QPushButton("History")
         btn_hist.setObjectName("DrawerMenuItem")
         btn_hist.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -104,27 +71,18 @@ class AttachedRightDrawer(SmoothGlassFrame):
         btn_set.clicked.connect(lambda: self.show_page(PAGE_SETTINGS))
         m_lay.addWidget(btn_set)
 
-        btn_teach = QPushButton("Teach Ocean")
-        btn_teach.setObjectName("DrawerMenuItem")
-        btn_teach.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_teach.setFixedHeight(46)
-        btn_teach.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_teach.clicked.connect(lambda: self.show_page(PAGE_TEACH))
-        m_lay.addWidget(btn_teach)
-
         m_lay.addStretch()
         self.stack.addWidget(page_menu)
 
         # Page order must match the PAGE_* indexes above.
         self.history_page = HistoryPage(self.main_win)
         self.settings_page = SettingsPage(self.main_win, self)
-        self.teach_page = TeachPage(self.main_win)
-        self.pages = {PAGE_HISTORY: self.history_page, PAGE_SETTINGS: self.settings_page, PAGE_TEACH: self.teach_page}
+        self.pages = {PAGE_HISTORY: self.history_page, PAGE_SETTINGS: self.settings_page}
         for index in sorted(self.pages):
             self.stack.addWidget(self.pages[index])
 
     def show_page(self, index: int) -> None:
-        titles = {PAGE_MENU: "Ocean Menu", PAGE_HISTORY: "History", PAGE_SETTINGS: "Settings", PAGE_TEACH: "Teach Ocean"}
+        titles = {PAGE_MENU: "Ocean Menu", PAGE_HISTORY: "History", PAGE_SETTINGS: "Settings"}
         self.drawer_title.setText(titles.get(index, "Ocean Menu"))
         self.back_menu_btn.setVisible(index != PAGE_MENU)
         page = self.pages.get(index)

@@ -1,13 +1,9 @@
-"""Drawer page with the theme, font size, learning mode, voice, refresh-period and dictionary-source settings."""
-from typing import Dict, TYPE_CHECKING
+"""Drawer page with the theme, font size, learning mode, voice and refresh-period settings."""
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import QCheckBox, QFormLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
-
-import lexical_engine
-
-from dictionary_sources import REGISTRY
+from PyQt6.QtWidgets import QFormLayout, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from storage import DEFAULT_REFRESH_PERIOD, REFRESH_PERIOD_DAYS
 from ui.config import SPEED_OPTIONS, VOICE_OPTIONS
@@ -62,14 +58,6 @@ class SettingsPage(QWidget):
 
         s_lay.addLayout(form)
 
-        self.offline_check = QCheckBox("Offline-only mode (no network requests at all)")
-        self.offline_check.setToolTip(
-            "Use only your history, Ocean's bundled lexicon, your own entries and the offline "
-            "translator and voice. Nothing is sent over the network."
-        )
-        self.offline_check.setChecked(bool(self.main_win.settings.data.get("offline_only", False)))
-        s_lay.addWidget(self.offline_check)
-
         self.test_voice_btn = QPushButton("  Test Voice")
         self.test_voice_btn.setObjectName("GlassPillButton")
         self.test_voice_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -77,8 +65,6 @@ class SettingsPage(QWidget):
         self.test_voice_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.test_voice_btn.clicked.connect(self._test_voice)
         s_lay.addWidget(self.test_voice_btn)
-
-        self._build_sources_group(s_lay)
 
         s_lay.addStretch()
 
@@ -103,30 +89,8 @@ class SettingsPage(QWidget):
         action_row.addWidget(save_btn, stretch=1)
         s_lay.addLayout(action_row)
 
-
-    def _build_sources_group(self, parent_layout: QVBoxLayout) -> None:
-        """The "Dictionary sources" group: one checkbox per registered source, bundled ones included
-        (switching off a local source is as legitimate as switching off a slow site)."""
-        title = QLabel("Dictionary sources")
-        title.setObjectName("CardTitle")
-        parent_layout.addWidget(title)
-        hint = QLabel("Every source is stored on this computer. Turn off one you don't want: it is not read "
-                      "for any lookup. Click Apply or Save to use the change.")
-        hint.setObjectName("MutedText")
-        hint.setWordWrap(True)
-        parent_layout.addWidget(hint)
-        self.source_checks: Dict[str, QCheckBox] = {}
-        for source in REGISTRY.all():
-            box = QCheckBox(source.label)
-            box.setChecked(REGISTRY.is_enabled(source.name))
-            self.source_checks[source.name] = box
-            parent_layout.addWidget(box)
-
     def on_show(self) -> None:
         self.theme_drop.setCurrentText(self.main_win.settings.data.get("theme", "Dark Mode"))
-        self.offline_check.setChecked(bool(self.main_win.settings.data.get("offline_only", False)))
-        for name, box in self.source_checks.items():  # discard unsaved ticks from an earlier visit
-            box.setChecked(REGISTRY.is_enabled(name))
 
     def apply_icons(self, accent: str) -> None:
         self.test_voice_btn.setIcon(VectorIcons.speaker_icon(accent))
@@ -144,7 +108,6 @@ class SettingsPage(QWidget):
         self.main_win.settings.data["font_scale"] = sel
         self.main_win.settings.data["base_font_px"] = scale_map.get(sel, 14)
         self.main_win.settings.data["learning_mode"] = self.mode_drop.currentText()
-        self.main_win.settings.data["offline_only"] = self.offline_check.isChecked()
         self.main_win.settings.data["voice_id"] = self.voice_drop.currentText()
         self.main_win.settings.data["refresh_period"] = self.refresh_drop.currentText()
         sp_txt = self.speed_drop.currentText().split()[0]
@@ -153,20 +116,13 @@ class SettingsPage(QWidget):
         except Exception:
             self.main_win.settings.data["speech_rate"] = 0
 
-    def _collect_sources(self) -> None:
-        """Store the ticked sources in the settings and switch the registry to match."""
-        self.main_win.settings.data["disabled_sources"] = [n for n, box in self.source_checks.items() if not box.isChecked()]
-        self.main_win.settings.apply_sources()
-
     def _test_voice(self) -> None:
         self._collect_settings()
         self.main_win.speaker.speak("Hello, welcome to Ocean.")
 
     def _apply_live(self) -> None:
         self._collect_settings()
-        self._collect_sources()
         self.main_win.settings.save()
-        lexical_engine.set_offline_only(self.main_win.settings.data["offline_only"])
         self.main_win._apply_theme()
         if self.main_win.current_term and self.main_win.current_data:
             self.main_win.results_page.render(self.main_win.current_term, self.main_win.current_data)

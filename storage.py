@@ -1,5 +1,4 @@
 # Qt-free storage for history and favourites (the `lexicon` table).
-# Review progress lives in the same database file but is handled by review.ReviewStore.
 import json
 import re
 import sqlite3
@@ -75,19 +74,8 @@ def refresh_replaces(old: Dict[str, Any], new: Optional[Dict[str, Any]]) -> bool
     return not (has_real_translation(old) and not has_real_translation(new))
 
 
-SORT_RECENT = "recent"
-SORT_MOST_LOOKED_UP = "most_looked_up"
-
-
 class HistoryStore:
-    """Looked-up entries: history plus the favourites flag and a per-entry lookup counter.
-
-    What counts as a lookup: a user-initiated one (typing a term, picking a suggestion, clicking a
-    history row, candidate or related word, the global hotkey), whether it was fetched fresh or served
-    from this store's cache. Re-rendering an entry, toggling its star, refreshing it
-    and back/forward navigation are not lookups. The UI calls record_lookup() for each lookup;
-    save_entry() never touches the counter, so storing a fresh or refreshed result cannot inflate it.
-    """
+    """Looked-up entries: history plus the favourites flag, newest lookup first."""
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -119,11 +107,13 @@ class HistoryStore:
                 )
                 """
             )
-            self._add_column_if_missing(conn, "lookup_count", "INTEGER NOT NULL DEFAULT 1")
             # produced_at / engine_version say when and by which engine the payload was fetched
             # (updated_at changes on every save, including edits). NULL = saved before they existed.
             self._add_column_if_missing(conn, "produced_at", "TEXT")
             self._add_column_if_missing(conn, "engine_version", "INTEGER")
+            # Progress table of the removed Review feature. (Older databases keep their now unused
+            # lookup_count column: it has a default, so inserts ignore it.)
+            conn.execute("DROP TABLE IF EXISTS reviews")
 
     @staticmethod
     def _add_column_if_missing(conn: sqlite3.Connection, name: str, definition: str) -> None:
@@ -166,16 +156,13 @@ class HistoryStore:
                     (now, lexical_engine.ENGINE_VERSION, key),
                 )
 
-    def record_lookup(self, term: str) -> None:
-        """Count one user-initiated lookup of an existing entry and move it to the top of the recent list.
-        A term not stored yet is ignored: save_entry() creates it with a count of 1."""
+    def touch_entry(self, term: str) -> None:
+        """Move an existing entry to the top of the recent list (a term not stored yet is ignored:
+        save_entry() creates it)."""
         key = term.strip().lower()
         now = datetime.now().isoformat(timespec="seconds")
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE lexicon SET lookup_count = lookup_count + 1, updated_at = ? WHERE query_key = ?",
-                (now, key),
-            )
+            conn.execute("UPDATE lexicon SET updated_at = ? WHERE query_key = ?", (now, key))
 
     def get_entry(self, term: str) -> Optional[Dict[str, Any]]:
         key = term.strip().lower()
@@ -235,52 +222,26 @@ class HistoryStore:
                     break
         return matches
 
-    def favorite_entries(self) -> List[Dict[str, Any]]:
-        """Saved (favourite) entries with their full payloads, newest first; the quiz draws on these."""
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT query_key, display_term, payload FROM lexicon WHERE is_favorite = 1 ORDER BY updated_at DESC"
-            ).fetchall()
-        entries = []
-        for key, term, payload in rows:
-            try:
-                entries.append({"query_key": key, "display_term": term, "payload": json.loads(payload)})
-            except ValueError:
-                continue
-        return entries
-
-    def list_entries(
-        self, favorites_only: bool = False, query: str = "", sort: str = SORT_RECENT
-    ) -> List[Dict[str, Any]]:
-        """History rows, optionally narrowed to favourites and to those matching `query`, in `sort` order.
+    def list_entries(self, favorites_only: bool = False, query: str = "") -> List[Dict[str, Any]]:
+        """History rows, newest first, optionally narrowed to favourites and to those matching `query`.
 
         `query` is a case-insensitive substring match on the English/display term and on the Persian
         meaning; Persian is compared through lexical_engine.fa_key so Arabic/Persian letter variants,
-        diacritics and zero-width joiners do not matter. SORT_RECENT is newest first; SORT_MOST_LOOKED_UP
-        is highest lookup count first, ties broken by recency."""
-        sql = "SELECT query_key, display_term, is_favorite, updated_at, lookup_count"
+        diacritics and zero-width joiners do not matter."""
+        sql = "SELECT query_key, display_term, is_favorite, updated_at"
         needle = lexical_engine.fa_key(query).lower()
         if needle:
             sql += ", payload"
         sql += " FROM lexicon"
         if favorites_only:
             sql += " WHERE is_favorite = 1"
-        if sort == SORT_MOST_LOOKED_UP:
-            sql += " ORDER BY lookup_count DESC, updated_at DESC, id DESC"
-        else:
-            sql += " ORDER BY updated_at DESC, id DESC"
+        sql += " ORDER BY updated_at DESC, id DESC"
         with self._conn() as conn:
             rows = conn.execute(sql).fetchall()
         if needle:
-            rows = [r for r in rows if self._matches(needle, r[0], r[1], r[5])]
+            rows = [r for r in rows if self._matches(needle, r[0], r[1], r[4])]
         return [
-            {
-                "query_key": r[0],
-                "display_term": r[1],
-                "is_favorite": bool(r[2]),
-                "updated_at": r[3],
-                "lookup_count": r[4],
-            }
+            {"query_key": r[0], "display_term": r[1], "is_favorite": bool(r[2]), "updated_at": r[3]}
             for r in rows
         ]
 
