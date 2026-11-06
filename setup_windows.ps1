@@ -82,22 +82,6 @@ if ($WithSlm) {
     }
 }
 
-# UI fonts (SIL OFL): Inter for English, Vazirmatn for Persian.
-if (-not ((Test-Path "fonts\Vazirmatn-Medium.ttf") -and (Test-Path "fonts\Inter-Medium.ttf"))) {
-    $tmp = Join-Path $env:TEMP "ocean_fonts"
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $tmp, "fonts" | Out-Null
-    Invoke-WebRequest -UseBasicParsing "https://github.com/rastikerdar/vazirmatn/releases/download/v33.003/vazirmatn-v33.003.zip" -OutFile "$tmp\vazirmatn.zip"
-    Invoke-WebRequest -UseBasicParsing "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip" -OutFile "$tmp\inter.zip"
-    Expand-Archive "$tmp\vazirmatn.zip" "$tmp\vazirmatn" -Force
-    Expand-Archive "$tmp\inter.zip" "$tmp\inter" -Force
-    foreach ($w in @("Regular", "Medium", "Bold")) {
-        Copy-Item "$tmp\vazirmatn\fonts\ttf\Vazirmatn-$w.ttf" "fonts\" -Force
-        Copy-Item "$tmp\inter\extras\ttf\Inter-$w.ttf" "fonts\" -Force
-    }
-    Remove-Item $tmp -Recurse -Force
-}
-
 if (-not (Test-Path "ocean.ico")) {
     & .\.venv\Scripts\python.exe app.py --make-icon
 }

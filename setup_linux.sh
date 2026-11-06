@@ -74,17 +74,4 @@ if [ "$WITH_SLM" = 1 ]; then
     fi
 fi
 
-# UI fonts (SIL OFL): Inter for English, Vazirmatn for Persian.
-if [ ! -f fonts/Vazirmatn-Medium.ttf ] || [ ! -f fonts/Inter-Medium.ttf ]; then
-    tmp="$(mktemp -d)"
-    curl -fL --retry 3 -o "$tmp/vazirmatn.zip" https://github.com/rastikerdar/vazirmatn/releases/download/v33.003/vazirmatn-v33.003.zip
-    curl -fL --retry 3 -o "$tmp/inter.zip" https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
-    mkdir -p fonts
-    for w in Regular Medium Bold; do
-        unzip -o -j -q "$tmp/vazirmatn.zip" "fonts/ttf/Vazirmatn-$w.ttf" -d fonts
-        unzip -o -j -q "$tmp/inter.zip" "extras/ttf/Inter-$w.ttf" -d fonts
-    done
-    rm -rf "$tmp"
-fi
-
 echo "Setup complete. Start Ocean with ./run.sh"
