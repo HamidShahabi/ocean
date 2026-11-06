@@ -7,6 +7,8 @@ An English → Persian learner's dictionary.
 - [Install](#install)
 - [Looking things up](#looking-things-up)
 - [History](#history)
+- [Refresh and Back](#refresh-and-back)
+- [Reports](#reports)
 - [Settings](#settings)
 - [Dictionary data](#dictionary-data)
 - [Your data](#your-data)
@@ -93,7 +95,23 @@ Every source is on your computer (see [Dictionary data](#dictionary-data)), so a
 
 ## History
 
-**Menu › History** lists your lookups, newest first, and has a search box that filters as you type, in English or Persian. It matches the word and its Persian meaning, and Arabic and Persian letter variants such as ي/ی and ك/ک count as the same. The search combines with **Saved Favorites Only**. Looking a word up again moves it to the top.
+**Menu › History** lists your lookups, newest first, and has a search box that filters as you type, in English or Persian. It matches the word and its Persian meaning, and Arabic and Persian letter variants such as ي/ی and ك/ک count as the same. The search combines with **Favorites Only**. Looking a word up again moves it to the top.
+
+Tick the checkbox next to entries (or **Select all**) and press **Delete Selected** to remove them all at once; Ocean asks for confirmation first, and says how many of them are favourites. A deleted entry is gone from the history and the favourites together.
+
+## Refresh and Back
+
+A first search always shows the best result Ocean has locally. **Refresh** (top right of the first card) looks the entry up again with the online resources; the result on screen stays until the improved one is ready. If Refresh finds nothing better (or you are offline) the current result is kept. After a refresh that changed the entry, the top-left **Back** button returns to the output you saw before the refresh, and **Forward** to the refreshed one.
+
+## Reports
+
+Next to **Save** on every word, sentence, idiom or Persian result there is a small **!** button. One click reports the entry: Ocean stores it (the full result as shown, a picture of the page, the date and the Ocean and engine versions) in your database and fills the button in. A small box offers an optional one-line note (what looks wrong); clicking **!** again lets you edit the note or remove the report.
+
+**Menu › Reports** lists them (term, date, note). Click one to open the entry as it was reported; **✕** deletes it after a confirmation. **Export for Claude** saves everything as one `.zip` that you attach to a chat when you next update Ocean:
+
+- `README.md`: tells Claude how to use the bundle (find the root cause, fix it system-wide, add tests),
+- `reports.json`: the environment (OS, versions, size and build statistics of the lexicon database) and every report with its note and full result,
+- `snapshots/`: one PNG of each reported page.
 
 ## Settings
 
@@ -105,7 +123,7 @@ The int8 model has not had a side-by-side listening test against the full-size o
 
 ### Dictionary sources
 
-Ocean has four sources, all stored on your computer: Wiktionary, WordNet 3.1, Urban Dictionary and the Tatoeba/OpenSubtitles example sentences. Every source is always used; there is nothing to switch.
+There is nothing to switch: every source is always used. **Menu › Sources** lists them read-only, with their priority (the order Ocean uses them) and what each is used for. The list is the `SOURCES` table in `ui/sources_page.py`; edit it when a source is added or removed.
 
 ### Refreshing saved entries
 
@@ -149,7 +167,7 @@ To rebuild the database (for example with a newer Kaikki extract, or to add the 
 
 ## Your data
 
-History, favourites, your translation fixes, settings and the log file (`ocean.log`) are stored per user, so updating or rebuilding the app never touches them:
+History, favourites, your reports, your translation fixes, settings and the log file (`ocean.log`) are stored per user, so updating or rebuilding the app never touches them:
 
 | System | Folder |
 |---|---|

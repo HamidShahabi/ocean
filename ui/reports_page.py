@@ -123,12 +123,14 @@ class ReportRowWidget(QWidget):
         self.term_lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         col.addWidget(self.term_lbl)
         meta = f"{format_when(report['created_at'])}  ·  {KIND_LABELS.get(report['kind'], report['kind'])}"
-        if report["note"]:
-            meta += f"  ·  {report['note']}"
-        self.meta_lbl = QLabel(QFontMetrics(self.font()).elidedText(meta, Qt.TextElideMode.ElideRight, 270))
+        self.meta_lbl = QLabel(meta)
         self.meta_lbl.setObjectName("MutedText")
-        self.meta_lbl.setToolTip(meta)
+        self.meta_lbl.setToolTip(meta + (f"\n{report['note']}" if report["note"] else ""))
         col.addWidget(self.meta_lbl)
+        if report["note"]:
+            self.note_lbl = QLabel(QFontMetrics(self.font()).elidedText(report["note"], Qt.TextElideMode.ElideRight, 280))
+            self.note_lbl.setObjectName("MutedText")
+            col.addWidget(self.note_lbl)
         lay.addLayout(col, 1)
         self.del_btn = QPushButton("✕")
         self.del_btn.setObjectName("RowDeleteButton")
@@ -194,7 +196,7 @@ class ReportsPage(QWidget):
         for rep in reports:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, rep["id"])
-            item.setSizeHint(QSize(0, 58))
+            item.setSizeHint(QSize(0, 78 if rep["note"] else 58))
             row = ReportRowWidget(rep, self._ask_delete)
             self.report_list.addItem(item)
             self.report_list.setItemWidget(item, row)

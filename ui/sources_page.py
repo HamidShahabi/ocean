@@ -51,7 +51,7 @@ class SourcesPage(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
-        body.setObjectName("CardsContainer")
+        scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }")
         body_lay = QVBoxLayout(body)
         body_lay.setContentsMargins(0, 0, 6, 0)
         body_lay.setSpacing(10)
