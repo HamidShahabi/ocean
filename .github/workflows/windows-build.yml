@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up (venv, locked dependencies, NLTK data, voice + translation models, dictionary database, fonts, icon)
+      - name: Set up (venv, locked dependencies, voice + translation models, dictionary database, fonts, icon)
         env:
           QT_QPA_PLATFORM: offscreen   # icon generation creates a QApplication; no desktop needed
         run: |

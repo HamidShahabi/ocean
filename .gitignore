@@ -13,7 +13,6 @@ kokoro-v1.0.onnx
 kokoro-v1.0.int8.onnx
 voices-v1.0.bin
 *.part
-nltk_data/
 offline_mt_model/
 offline_slm_model/
 ocean_lexicon.db

@@ -306,21 +306,21 @@ class UiSmokeTest(unittest.TestCase):
         for source in registry.all():
             self.assertEqual(source.label, page.source_checks[source.name].text())
         page.source_checks["urban_dictionary"].setChecked(False)
-        page.source_checks["wordnet"].setChecked(False)
+        page.source_checks["kaikki"].setChecked(False)
         with mock.patch.object(self.win.settings, "save") as save:
             page._apply_live()
         self.assertTrue(save.called)
-        self.assertEqual(self.win.settings.data["disabled_sources"], ["wordnet", "urban_dictionary"])  # menu order
-        self.assertEqual(registry.disabled_names(), ["urban_dictionary", "wordnet"])
+        self.assertEqual(self.win.settings.data["disabled_sources"], ["kaikki", "urban_dictionary"])  # menu order
+        self.assertEqual(registry.disabled_names(), ["kaikki", "urban_dictionary"])
         page.source_checks["urban_dictionary"].setChecked(True)
         with mock.patch.object(self.win.settings, "save"):
             page._apply_live()
-        self.assertEqual(registry.disabled_names(), ["wordnet"])
+        self.assertEqual(registry.disabled_names(), ["kaikki"])
         # Reopening the page drops ticks that were never applied.
         page.source_checks["corpora"].setChecked(False)
         page.on_show()
         self.assertTrue(page.source_checks["corpora"].isChecked())
-        self.assertFalse(page.source_checks["wordnet"].isChecked())
+        self.assertFalse(page.source_checks["kaikki"].isChecked())
 
     def test_offline_badge_says_where_the_result_came_from(self):
         lexical_engine.set_offline_only(True)
@@ -394,7 +394,7 @@ class UiSmokeTest(unittest.TestCase):
         # Entries with definitions (e.g. saved ones) and one source left on need no notice.
         self.win.results_page.render("serendipity", WORD)
         self.assertNotIn("All dictionary sources are turned off", card_texts(self.win))
-        registry.set_enabled("wordnet", True)
+        registry.set_enabled("kaikki", True)
         self.win.results_page.render("serendipity", empty)
         self.assertNotIn("All dictionary sources are turned off", card_texts(self.win))
 

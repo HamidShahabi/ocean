@@ -41,17 +41,17 @@ class SettingsStoreTest(unittest.TestCase):
 
     def test_choice_persists_and_is_applied_to_the_registry(self):
         s = SettingsManager(self.path)
-        s.data["disabled_sources"] = ["urban_dictionary", "wordnet"]
+        s.data["disabled_sources"] = ["urban_dictionary", "corpora"]
         s.save()
         reloaded = SettingsManager(self.path)
-        self.assertEqual(reloaded.data["disabled_sources"], ["urban_dictionary", "wordnet"])
+        self.assertEqual(reloaded.data["disabled_sources"], ["urban_dictionary", "corpora"])
         reloaded.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["urban_dictionary", "wordnet"])
+        self.assertEqual(ds.REGISTRY.disabled_names(), ["corpora", "urban_dictionary"])
         self.assertTrue(ds.REGISTRY.is_enabled("kaikki"))
         # Switching one back on is applied too.
-        reloaded.data["disabled_sources"] = ["wordnet"]
+        reloaded.data["disabled_sources"] = ["corpora"]
         reloaded.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["wordnet"])
+        self.assertEqual(ds.REGISTRY.disabled_names(), ["corpora"])
 
     def test_unknown_and_malformed_entries_are_ignored(self):
         with open(self.path, "w", encoding="utf-8") as f:
@@ -64,12 +64,12 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertEqual(SettingsManager(self.path).data["disabled_sources"], [])
 
     def test_sources_removed_in_an_update_are_ignored(self):
-        # A settings file from a version with the online dictionaries (Cambridge, Longman...) still loads.
+        # A settings file from a version with the online dictionaries (Cambridge, Longman...) or WordNet still loads.
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({"disabled_sources": ["cambridge", "longman", "datamuse", "wordnet"]}, f)
         s = SettingsManager(self.path)
         s.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["wordnet"])
+        self.assertEqual(ds.REGISTRY.disabled_names(), [])
 
     def test_a_settings_file_from_before_the_toggles_keeps_everything_on(self):
         with open(self.path, "w", encoding="utf-8") as f:
@@ -83,7 +83,7 @@ class SettingsStoreTest(unittest.TestCase):
         for name in ds.REGISTRY.names():
             ds.REGISTRY.set_enabled(name, False)
         self.assertFalse(ds.REGISTRY.any_enabled())
-        ds.REGISTRY.set_enabled("wordnet", True)
+        ds.REGISTRY.set_enabled("corpora", True)
         self.assertTrue(ds.REGISTRY.any_enabled())
 
 
@@ -104,8 +104,6 @@ class DisabledSourcesAreNeverReadTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         for p in (
-            mock.patch.object(le, "wn", None),
-            mock.patch.object(le, "LEMMATIZER", None),
             mock.patch.object(le, "fetch_persian_word_meaning", lambda t, is_idiom=False: ("FA:" + t, "")),
             mock.patch.object(le, "translate_batch_fast", lambda sentences, short_terms: {s: "fa " + s for s in list(sentences) + list(short_terms)}),
         ):
@@ -128,7 +126,7 @@ class DisabledSourcesAreNeverReadTest(unittest.TestCase):
 
     def test_every_enabled_source_is_read(self):
         self.lookup_all_kinds()
-        self.assertEqual(set(self.fetched), {"kaikki", "urban_dictionary", "corpora"})  # WordNet is absent here
+        self.assertEqual(set(self.fetched), {"kaikki", "urban_dictionary", "corpora"})
 
     def test_nothing_is_read_with_every_source_disabled(self):
         for name in ds.REGISTRY.names():

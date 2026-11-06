@@ -4,11 +4,15 @@ import re
 import sys
 import html
 import json
+import time
 import shutil
+import socket
 import logging
 import sqlite3
 import threading
 import contextvars
+import urllib.parse
+import urllib.request
 from collections import OrderedDict
 from functools import lru_cache
 from contextlib import contextmanager
@@ -19,7 +23,9 @@ import requests
 from requests.adapters import HTTPAdapter
 
 import lexicon_db
+import lexicon_text as lt
 import offline_slm
+import translation_cache
 import word_levels
 
 
@@ -114,44 +120,14 @@ def user_data_path(filename: str) -> str:
 # Bump when lookups improve (new sources, better translations, fixed bugs): saved entries produced
 # by an older version get fetched again on their next lookup (see storage.is_stale).
 # Entries saved before versions were recorded count as version 0.
-ENGINE_VERSION = 2  # 2: local datasets (Kaikki, WordNet 3.1, Urban Dictionary, Tatoeba, OpenSubtitles)
+ENGINE_VERSION = 3  # 3: no WordNet; clean subtitle-first examples, few everyday senses, IPA in one notation, idiom matching, cached translations
+#                    2: local datasets (Kaikki, WordNet 3.1, Urban Dictionary, Tatoeba, OpenSubtitles)
 
 USER_MEMORY_FILE = user_data_path("user_memory.json")
 CEFR_LEVELS_FILE = os.path.join(ENGINE_BASE_DIR, "cefr_levels.json")
 LEXICON_DB_FILE = os.path.join(ENGINE_BASE_DIR, "ocean_lexicon.db")  # built by tools/build_lexicon_db.py
 OFFLINE_MT_DIR = os.path.join(ENGINE_BASE_DIR, "offline_mt_model")
 OFFLINE_SLM_DIR = os.path.join(ENGINE_BASE_DIR, "offline_slm_model")
-
-try:
-    import nltk
-    for cand_nltk in (
-        os.path.join(ENGINE_BASE_DIR, "nltk_data"),
-        os.path.join(os.path.dirname(sys.executable), "nltk_data") if getattr(sys, "frozen", False) else "",
-        os.path.join(os.path.dirname(sys.executable), "_internal", "nltk_data") if getattr(sys, "frozen", False) else "",
-    ):
-        if cand_nltk and os.path.isdir(cand_nltk) and cand_nltk not in nltk.data.path:
-            nltk.data.path.insert(0, cand_nltk)
-    def _installed(resource: str) -> bool:
-        for name in (resource, resource + ".zip"):  # the downloader may leave it zipped
-            try:
-                nltk.data.find(name)
-                return True
-            except LookupError:
-                pass
-        return False
-
-    # WordNet 3.1 when installed (it needs the 3.0 data too, which the lemmatizer uses)
-    if _installed("corpora/wordnet31"):
-        from nltk.corpus import wordnet31 as wn
-    else:
-        log.warning("WordNet 3.1 not installed: using WordNet 3.0")
-        from nltk.corpus import wordnet as wn
-    from nltk.stem import WordNetLemmatizer
-    LEMMATIZER = WordNetLemmatizer()
-except Exception:
-    log.warning("NLTK/WordNet unavailable: morphology and relations disabled", exc_info=True)
-    wn = None
-    LEMMATIZER = None
 
 try:
     import eng_to_ipa as ipa_engine
@@ -180,6 +156,8 @@ def _log_failure(what: str) -> None:
     if isinstance(exc, OfflineModeError):
         return  # offline-only mode refusing a request is expected, not a failure
     if isinstance(exc, requests.RequestException):
+        if isinstance(exc, requests.ConnectionError):
+            note_network_failure()
         log.warning("%s: %s", what, exc.__class__.__name__)
     else:
         log.exception(what)
@@ -204,6 +182,7 @@ def load_json_safe(path: str, default: Dict[str, Any]) -> Dict[str, Any]:
 USER_MEMORY = load_json_safe(USER_MEMORY_FILE, {"entries": {}, "overrides": {}})
 LEXICON = lexicon_db.LexiconDB(LEXICON_DB_FILE)
 SLM = offline_slm.OfflineSLM(OFFLINE_SLM_DIR)
+TRANSLATION_CACHE = translation_cache.TranslationCache(os.path.join(USER_DATA_DIR, "translation_cache.db"))
 
 
 def _load_ct2_model() -> None:
@@ -225,41 +204,12 @@ def _load_ct2_model() -> None:
         _SP_PROCESSOR, _CT2_TRANSLATOR = sp_proc, translator
 
 
-_WORDNET_LOCK = threading.Lock()
-_WORDNET_READY = False
-
-
-def ensure_wordnet() -> None:
-    """Load WordNet once, before any lookup reads it: NLTK's lazy corpus loaders are not safe to load from
-    two threads at once, and the preload races the first lookup (a --lookup start). Later calls return at once."""
-    global _WORDNET_READY
-    if _WORDNET_READY or not hasattr(wn, "ensure_loaded"):  # None, or a stand-in (tests)
-        return
-    with _WORDNET_LOCK:
-        if _WORDNET_READY:
-            return
-        try:
-            from nltk.corpus import wordnet as wordnet30  # the lemmatizer's, and what WordNet 3.1 maps onto
-            wordnet30.ensure_loaded()
-            wn.ensure_loaded()
-        except Exception:
-            log.exception("Could not load WordNet")
-        _WORDNET_READY = True  # loaded, or failed for good: lookups log their own WordNet errors
-
-
-def preload_wordnet() -> threading.Thread:
-    """Read WordNet in the background: WordNet 3.1 takes a few seconds to load, which would otherwise
-    delay the first lookup."""
-    thread = threading.Thread(target=ensure_wordnet, name="wordnet-preload", daemon=True)
-    thread.start()
-    return thread
-
-
 def preload_offline_translator() -> threading.Thread:
     """Load the offline model in the background so the first offline lookup doesn't stall.
     Not a daemon: quitting while the native model is mid-load crashes the process, so
     interpreter shutdown waits for the load to finish (same as the Kokoro voice model)."""
     def run() -> None:
+        is_online()  # learn at once whether there is internet, so the first lookup does not have to wait for the probe
         if not HAS_CT2_BACKUP:
             return
         try:
@@ -523,7 +473,8 @@ WEAK_FORM_IPA = {
 
 
 # === SECTION 3: NETWORK, SENTENCE AUTO-CORRECTION & SANITIZATION UTILITIES ===
-_OFFLINE_ONLY = False  # Settings > Offline-only mode: no network request of any kind while set
+_OFFLINE_ONLY = False  # a hard switch (tests, diagnostics): no network request of any kind while set. The app has no
+#                        setting for it any more: it notices a missing connection by itself (see is_online).
 
 
 class OfflineModeError(requests.ConnectionError):
@@ -537,6 +488,81 @@ def set_offline_only(enabled: bool) -> None:
 
 def is_offline_only() -> bool:
     return _OFFLINE_ONLY
+
+
+# --- Connectivity: found out once, remembered for a while ---
+PROBE_HOST = "translate.googleapis.com"
+PROBE_TIMEOUT = 1.0        # seconds a lookup waits to learn that the internet is not there
+ONLINE_TTL = 30.0          # a successful probe is trusted this long
+OFFLINE_TTL = 60.0         # a failed probe (or a failed connection) is trusted this long: offline lookups never wait again
+_NET_LOCK = threading.Lock()
+_NET_STATE: Dict[str, Any] = {"online": None, "until": 0.0}
+
+
+def _probe_target() -> Tuple[str, int]:
+    """Where to try a TCP connection: the proxy when the system uses one (a direct connection would fail on
+    such a network although requests work), else the translation service itself."""
+    try:
+        proxy = urllib.request.getproxies().get("https")
+        if proxy:
+            parsed = urllib.parse.urlparse(proxy if "//" in proxy else "//" + proxy)
+            if parsed.hostname:
+                return parsed.hostname, parsed.port or 443
+    except Exception:
+        pass
+    return PROBE_HOST, 443
+
+
+def _probe_connectivity() -> bool:
+    """Whether a TCP connection can be made right now, never waiting longer than PROBE_TIMEOUT (the name lookup,
+    which has no timeout of its own, runs in a helper thread that is simply left behind)."""
+    result: List[bool] = []
+
+    def attempt() -> None:
+        try:
+            socket.create_connection(_probe_target(), timeout=PROBE_TIMEOUT).close()
+            result.append(True)
+        except Exception:
+            result.append(False)
+
+    thread = threading.Thread(target=attempt, name="connectivity-probe", daemon=True)
+    thread.start()
+    thread.join(PROBE_TIMEOUT + 0.3)
+    return bool(result and result[0])
+
+
+def is_online() -> bool:
+    """Whether the internet can be reached, from a cached probe: a lookup asks this before using an online
+    layer, so without a connection the answer takes no time after the first lookup and everything falls back
+    to the local resources at once."""
+    if _OFFLINE_ONLY:
+        return False
+    with _NET_LOCK:
+        now = time.monotonic()
+        if _NET_STATE["online"] is not None and now < _NET_STATE["until"]:
+            return bool(_NET_STATE["online"])
+        online = _probe_connectivity()
+        _NET_STATE.update(online=online, until=time.monotonic() + (ONLINE_TTL if online else OFFLINE_TTL))
+        if not online:
+            log.info("No internet connection: lookups use the local resources for the next %d seconds", OFFLINE_TTL)
+        return online
+
+
+def note_network_failure() -> None:
+    """A request failed to connect: treat the internet as gone for OFFLINE_TTL seconds."""
+    with _NET_LOCK:
+        _NET_STATE.update(online=False, until=time.monotonic() + OFFLINE_TTL)
+
+
+def forget_connectivity() -> None:
+    """Probe again at the next question (Refresh: the user believes the connection is back)."""
+    with _NET_LOCK:
+        _NET_STATE.update(online=None, until=0.0)
+
+
+def network_allowed() -> bool:
+    """Whether an online layer may be tried: not forced offline, and the internet is there."""
+    return not _OFFLINE_ONLY and is_online()
 
 
 def _send_request(method: str, url: str, **kwargs) -> requests.Response:
@@ -845,7 +871,7 @@ def to_ipa_us(text: str) -> str:
     if not tokens:
         return "/-/"
     converted = [convert_token_to_ipa(tok) for tok in tokens]
-    joined = " ".join(c for c in converted if c)
+    joined = lt.normalize_ipa(" ".join(c for c in converted if c))
     return f"/{joined}/" if joined else "/-/"
 
 
@@ -855,31 +881,49 @@ def sentence_to_ipa(sentence: str) -> str:
     if not tokens:
         return ""
     ipa_words = [convert_token_to_ipa(tok) for tok in tokens]
-    joined = " ".join(w for w in ipa_words if w)
+    joined = lt.normalize_ipa(" ".join(w for w in ipa_words if w))
     return f"/{joined}/" if joined else ""
 
 
 def clean_ipa_display(ipa_str: str) -> str:
+    """A transcription in the one notation shown everywhere (lexicon_text.normalize_ipa), in slashes."""
     if not ipa_str or ipa_str == "/-/":
         return "/-/"
-    s = re.sub(r"[\u0300-\u036f\u0329\u030d]", "", ipa_str)
-    s = s.replace(".", "\u00b7").strip("/")
-    return f"/{s}/"
+    s = lt.normalize_ipa(ipa_str)
+    return f"/{s}/" if s else "/-/"
 
 
 # === SECTION 5: PRECISION MORPHOLOGY, ROOT, AFFIX & POS FAMILY ANALYZER ===
 def _is_valid_english_word(word: str) -> bool:
-    if not word or len(word) < 3 or not wn:
-        return False
-    return bool(wn.synsets(word))
+    return bool(word) and len(word) >= 3 and LEXICON.has_entry(word)
+
+
+def lemmatize(word: str) -> str:
+    """The base form of a word: Wiktionary's lemma for an inflected form; for a word it has no entry for, what plain
+    suffix rules give that it does have; else the word itself."""
+    low = word.lower().strip()
+    lemmas = LEXICON.lemmas(low)
+    if lemmas:
+        return lemmas[0]
+    if LEXICON.has_entry(low):
+        return low
+    cands = LEXICON.lemma_candidates(low)
+    return cands[0] if cands else low
+
+
+def lemma_candidates(word: str) -> List[str]:
+    """Base forms to try for an inflected word, most likely first (Wiktionary's, then plain suffix rules the
+    dictionary confirms; without a dictionary, none)."""
+    return LEXICON.lemma_candidates(word.lower().strip())
 
 
 def _find_true_morphological_root(word: str) -> Tuple[str, str]:
     low = word.lower().strip()
     if low in PROTECTED_ROOT_WORDS:
         return low, "None (Base Word)"
-    if not wn:
-        return low, "None"
+    lemmas = LEXICON.lemmas(low)
+    if lemmas:  # Wiktionary says it is an inflected form (or a variant spelling) of another word
+        return lemmas[0], "Inflected form"
 
     if low.endswith("ssion") and len(low) > 6:
         cand = low[:-3]
@@ -903,16 +947,12 @@ def _find_true_morphological_root(word: str) -> Tuple[str, str]:
                         continue
                     return c, f"-{suf}  [{pos_tag}: {meaning}]"
 
-    if LEMMATIZER:
-        for pos in ("v", "n", "a", "r"):
-            lem = LEMMATIZER.lemmatize(low, pos=pos)
-            if lem != low and len(lem) >= 3:
-                return lem, "Inflected form"
-
     return low, "None (Base Word)"
 
 
 def analyze_morphology(term: str) -> Dict[str, Any]:
+    """Root, prefix and suffix of a single word from affix rules checked against the dictionary. The word family
+    is added by _word_family() once the dictionary entry (its derived and related terms) is known."""
     clean = term.strip()
     words = clean.split()
     if len(words) > 1 or not clean.isalpha():
@@ -926,7 +966,7 @@ def analyze_morphology(term: str) -> Dict[str, Any]:
         for pref, meaning in PREFIX_RULES:
             if root.startswith(pref) and len(root) - len(pref) >= 4:
                 rem = root[len(pref):]
-                if rem not in FALSE_BOUND_STEMS and _is_valid_english_word(rem):
+                if rem not in FALSE_BOUND_STEMS and _is_valid_english_word(rem) and is_everyday_word(rem, floor=3.0):
                     detected_prefix = f"{pref}-  ({meaning})"
                     root = rem
                     break
@@ -938,55 +978,93 @@ def analyze_morphology(term: str) -> Dict[str, Any]:
     if detected_suffix not in ("None", "None (Base Word)", "Inflected form"):
         parts.append(f"{detected_suffix.split()[0]} (Suffix)")
     structure_str = "  +  ".join(parts) + f"   \u2192   {low}" if len(parts) > 1 else f"{low} (Base Root Word)"
+    return {"root": root, "structure": structure_str, "prefix": detected_prefix, "suffix": detected_suffix, "family": []}
 
-    family: List[Dict[str, str]] = []
-    seen_words = set()
-    pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
-    root_prefix = root[:4].lower()
 
-    if wn:
-        candidate_forms = [
-            root, low,
-            root + "ion", root + "ation", root + "ment", root + "ness",
-            root + "er", root + "or", root + "ive", root + "able",
-            root + "al", root + "ful", root + "less", root + "ly",
-            (root[:-1] + "ion") if root.endswith("e") else "",
-            (root[:-1] + "ive") if root.endswith("e") else "",
-            (root[:-1] + "able") if root.endswith("e") else "",
-        ]
-        for cf in candidate_forms:
-            if not cf or cf in seen_words:
+# Common-use floors: an English word or phrase shown as a relative, expression or synonym must be this frequent in
+# subtitles (occurrences per million words). Without word frequencies in the database nothing is filtered.
+EVERYDAY_PER_MILLION = 1.0
+MAX_FAMILY = 5
+MAX_COMMON_EXPRESSIONS = 8
+MAX_ALTERNATIVES = 3
+
+
+def is_everyday_word(word: str, floor: float = EVERYDAY_PER_MILLION) -> bool:
+    """Whether every word of the term is used in everyday speech: at least `floor` per million words of subtitles.
+    True when the database has no frequencies (nothing to judge by)."""
+    if not LEXICON.has("word_freq"):
+        return True
+    tokens = re.findall(r"[a-z]+(?:'[a-z]+)?", word.lower())
+    return bool(tokens) and all((LEXICON.frequency(t) or 0.0) >= floor for t in tokens)
+
+
+def _word_family(root: str, low: str, derived: List[str], related: List[str], pos_of: Callable[[str], str]) -> List[Dict[str, str]]:
+    """Everyday relatives of the word with their part of speech, from Wiktionary's derived and related terms:
+    single words that start like the root and that people say (not "birational")."""
+    stem = root[:4].lower()
+    out: List[Dict[str, str]] = []
+    seen = {low, root.lower()}
+    for cand in list(derived) + list(related):
+        c = cand.strip()
+        if not c or " " in c or "-" in c or c.lower() in seen or not c.lower().startswith(stem) or not c.isalpha():
+            continue
+        if LEXICON.lemmas(c) or not is_everyday_word(c, floor=2.0):
+            continue  # an inflection (it belongs to Forms) or a word nobody says
+        pos = pos_of(c)
+        if pos:
+            seen.add(c.lower())
+            out.append({"pos": pos, "word": c.lower()})
+    return out[:MAX_FAMILY]
+
+
+def _compact_key(phrase: str) -> str:
+    """Spaces and hyphens removed: "cis privilege", "cis-privilege" and "cisprivilege" are one expression."""
+    return re.sub(r"[\s\-]+", "", phrase.lower())
+
+
+MIN_PHRASE_HITS = 3   # a phrase must be said in at least this many subtitle lines to count as common
+PHRASE_HITS_CAP = 25
+
+
+def is_everyday_term(term: str) -> bool:
+    """Whether a word or phrase is used in everyday speech: every word is everyday and a phrase (or a hyphenated
+    compound) is said in at least MIN_PHRASE_HITS subtitle lines. True when the database has no subtitles to judge by."""
+    if not is_everyday_word(term):
+        return False
+    if (" " in term.strip() or "-" in term) and LEXICON.has("parallel_fts"):
+        return LEXICON.phrase_hits(term.replace("-", " "), MIN_PHRASE_HITS) >= MIN_PHRASE_HITS
+    return True
+
+
+def common_expressions(headword: str, derived: List[str], collocations: List[str]) -> List[str]:
+    """The commonly used derived terms and phrases (Wiktionary's "derived terms", then collocations): single
+    words must be everyday words (no "birational", "extrarational"), phrases must be said in the subtitles
+    (the more often the earlier; at least MIN_PHRASE_HITS lines) unless Wiktionary lists them as collocations,
+    forms of the headword itself (possessed, possessing) are left to Forms, spelling variants of one expression
+    count once (spaced form preferred), at most MAX_COMMON_EXPRESSIONS."""
+    low = headword.lower()
+    colloc = {c.lower() for c in collocations}
+    ranked: Dict[str, Tuple[int, int, str]] = {}  # compact key -> (hits, order, phrase)
+    for order, cand in enumerate(list(derived) + list(collocations)):
+        c = " ".join(cand.split())
+        if not c or c.lower() == low or (LEXICON.lemmas(c) and lemmatize(c) == low):
+            continue
+        if " " in c or "-" in c:
+            hits = LEXICON.phrase_hits(c.replace("-", " "), PHRASE_HITS_CAP) if LEXICON.has("parallel_fts") else PHRASE_HITS_CAP
+            if hits < MIN_PHRASE_HITS and c.lower() not in colloc:
                 continue
-            syns = wn.synsets(cf)
-            if syns:
-                for s in syns:
-                    for lem in s.lemmas():
-                        w_name = lem.name().replace("_", " ").lower()
-                        if w_name == cf and w_name.startswith(root_prefix) and w_name not in ("discus", "cuss"):
-                            seen_words.add(w_name)
-                            family.append({"pos": pos_map.get(s.pos(), "Word"), "word": w_name})
-                            break
-                    if cf in seen_words:
-                        break
-
-        for seed in (root, low):
-            for syn in wn.synsets(seed)[:4]:
-                for lem in syn.lemmas():
-                    if not lem.name().lower().startswith(root_prefix):
-                        continue
-                    for rel in lem.derivationally_related_forms():
-                        rw = rel.name().replace("_", " ").lower()
-                        if rw.startswith(root_prefix) and rw not in seen_words and rw not in ("discus", "cuss") and rw.isalpha():
-                            seen_words.add(rw)
-                            family.append({"pos": pos_map.get(rel.synset().pos(), "Word"), "word": rw})
-
-    return {
-        "root": root,
-        "structure": structure_str,
-        "prefix": detected_prefix,
-        "suffix": detected_suffix,
-        "family": family[:6],
-    }
+        else:
+            if LEXICON.lemmas(c) or not is_everyday_word(c, floor=2.0):
+                continue
+            hits = PHRASE_HITS_CAP // 2  # a plain derived word: judged by its frequency, ranked after the commonest phrases
+        key = _compact_key(c)
+        prior = ranked.get(key)
+        if prior is None:
+            ranked[key] = (hits, order, c)
+        elif " " in c and " " not in prior[2]:  # prefer the spaced spelling
+            ranked[key] = (max(hits, prior[0]), prior[1], c)
+    best = sorted(ranked.values(), key=lambda r: (-r[0], r[1]))[:MAX_COMMON_EXPRESSIONS]
+    return [phrase for _, _, phrase in best]
 
 
 # === SECTION 6: TWO-TIER ENGLISH -> PERSIAN TRANSLATOR ===
@@ -999,7 +1077,7 @@ def clean_definition_for_idiom_meaning(def_text: str) -> str:
 
 def _clients5(text: str, source: str, target: str) -> str:
     """Raw single-best translation from Google's dictionary-extension endpoint."""
-    if _OFFLINE_ONLY:
+    if not network_allowed():
         return ""
     try:
         r = smart_request(
@@ -1026,67 +1104,111 @@ def translate_via_clients5(text: str, is_short: bool = False) -> str:
     return normalize_persian(raw, is_short_term=is_short, source_en=clean) if raw else ""
 
 
-# Where a Persian translation came from (shown on results; "offline" ones are marked in offline-only mode).
+# Where a Persian translation came from (shown on results; the two "offline" ones are marked as machine output).
 FA_SOURCE_EDIT = "your edit"
+FA_SOURCE_IDIOMS = "Idiom dictionary"
 FA_SOURCE_WIKTIONARY = "Wiktionary"
 FA_SOURCE_GOOGLE = "Google Translate"
 FA_SOURCE_SLM = "offline language model"
 FA_SOURCE_NLLB = "offline translator"
 ONLINE_FA_SOURCES = {FA_SOURCE_GOOGLE}
 
+# Cache quality ranks: a better translation replaces a worse one, so offline guesses are upgraded when Google answers.
+QUALITY_GOOGLE, QUALITY_SLM, QUALITY_NLLB = 3, 2, 1
+# A Wiktionary Persian equivalent is accepted offline only when its rarest content word occurs at least this often in
+# the Persian side of the OpenSubtitles corpus: literary or unusual equivalents fall behind everyday ones.
+FA_MIN_SUBTITLE_COUNT = 10
 
-def local_translation(text: str, is_short: bool = False) -> Tuple[str, str]:
-    """Tier 1, the local database: (Persian, source) or ("", "").
+# True while a Refresh runs (in this context and the workers it starts): every online layer is asked again and what
+# comes back replaces the cached translation.
+_REFRESHING: "contextvars.ContextVar[bool]" = contextvars.ContextVar("refreshing", default=False)
 
-    A phrase or sentence found whole in Tatoeba or OpenSubtitles takes its human translation: the natural
-    everyday rendering ("good morning" -> صبح بخیر), which Wiktionary's lists often lack. A word (or a phrase
-    the corpora don't have) takes Wiktionary's translations of its main part of speech (an inflected form, its
-    lemma's): the best one for the first sense, plus one for the second sense when the corpora attest it, so
-    the money "bank" and the river "bank" are not run together. Among a sense's alternatives, the one used most
-    in the corpora's translations of sentences containing the word wins. A lone word never takes a corpus line:
-    that is often a name or a shout ("Run!"), not its meaning."""
+
+def _kind(is_short: bool) -> str:
+    return translation_cache.KIND_TERM if is_short else translation_cache.KIND_SENTENCE
+
+
+def _remember(text: str, fa: str, source: str, quality: int, is_short: bool) -> None:
+    TRANSLATION_CACHE.put(text, fa, source, quality, _kind(is_short))
+
+
+def _usable_equivalent(fa: str) -> bool:
+    """Whether a Wiktionary Persian equivalent is an everyday one (see FA_MIN_SUBTITLE_COUNT); true when the
+    database has no Persian word frequencies."""
+    count = LEXICON.persian_frequency(fa)
+    return count is None or count >= FA_MIN_SUBTITLE_COUNT
+
+
+def local_phrase_translation(text: str, is_short: bool = False) -> Tuple[str, str]:
+    """The human translations in the local database for a phrase or sentence: a pre-translated idiom (idioms_fa), or
+    the text found whole in Tatoeba or OpenSubtitles (the natural everyday rendering, "good morning" -> صبح بخیر).
+    ("", "") for a single word or when there is none."""
     clean = text.strip()
-    if not clean:
+    if len(clean.split()) < 2:
         return "", ""
-    words = clean.split()
-    if len(words) >= 2:
-        fa, corpus = LEXICON.translation_pair(clean)
-        fa = normalize_persian(fa, is_short_term=is_short, source_en=clean)
+    idiom = LEXICON.idiom_fa(clean)
+    if idiom:
+        fa = normalize_persian(idiom["fa"], is_short_term=is_short, source_en=clean)
         if fa:
-            return fa, "Tatoeba" if corpus == "tatoeba" else "OpenSubtitles"
-    if len(words) > 4:
+            return fa, FA_SOURCE_IDIOMS
+    fa, corpus = LEXICON.translation_pair(clean)
+    fa = normalize_persian(fa, is_short_term=is_short, source_en=clean)
+    if fa:
+        return fa, "Tatoeba" if corpus == "tatoeba" else "OpenSubtitles"
+    return "", ""
+
+
+def local_word_translation(text: str) -> Tuple[str, str]:
+    """Wiktionary's Persian for a word or short phrase: the best equivalent of the first sense of the main part of
+    speech (an inflected form takes its lemma's), plus one for the second sense when the corpora attest it, so the
+    money "bank" and the river "bank" are not run together. Equivalents that are not everyday words (rare in the
+    Persian subtitles) are passed over for commoner ones; among the rest the one used most in the corpora's
+    translations of sentences containing the word wins. A lone word never takes a corpus line: that is often a
+    name or a shout ("Run!"), not its meaning."""
+    clean = text.strip()
+    if not clean or len(clean.split()) > 4:
         return "", ""
     entries = LEXICON.entries(clean)
     main_pos = entries[0]["pos"] if entries else ""
+    head = entries[0]["word"] if entries else clean
     by_sense: Dict[str, List[str]] = {}
-    for t in LEXICON.persian(entries[0]["word"] if entries else clean):
+    for t in LEXICON.persian(head):
         fa = normalize_persian(t["fa"], is_short_term=True, source_en=clean)
         if fa and (not main_pos or t["pos"] == main_pos):  # a noun's translation is no answer for a verb
             by_sense.setdefault(t["sense"], [])
             if fa not in by_sense[t["sense"]]:
                 by_sense[t["sense"]].append(fa)
+    by_sense = {sense: [fa for fa in cands if _usable_equivalent(fa)] for sense, cands in by_sense.items()}
+    by_sense = {sense: cands for sense, cands in by_sense.items() if cands}
     if not by_sense:
         return "", ""
-    pairs = LEXICON.examples(entries[0]["word"] if entries else clean, limit=200, min_words=1, max_words=40)
+    pairs = LEXICON.sentence_pairs(head, limit=200, min_words=1, max_words=40)
 
     def attested(fa: str) -> int:
         return sum(fa in p["fa"] for p in pairs)
 
-    best = [max(cands, key=attested) for cands in list(by_sense.values())[:2]]  # max keeps the first on ties
+    best = [max(cands, key=lambda fa: (attested(fa), LEXICON.persian_frequency(fa) or 0)) for cands in list(by_sense.values())[:2]]
     chosen = best[:1] + [fa for fa in best[1:] if fa != best[0] and attested(fa)]
-    return " \u060c ".join(chosen), FA_SOURCE_WIKTIONARY
+    return " ، ".join(chosen), FA_SOURCE_WIKTIONARY
+
+
+def local_translation(text: str, is_short: bool = False) -> Tuple[str, str]:
+    """Tier 1, the local database: (Persian, source) or ("", ""). A phrase's human translation first, then a
+    word's Wiktionary equivalents."""
+    fa, source = local_phrase_translation(text, is_short)
+    return (fa, source) if fa else local_word_translation(text)
 
 
 def _google_translate(clean: str, is_short: bool) -> str:
-    """The optional online layer (never in offline-only mode): Google's gtx endpoint, then clients5."""
+    """The online layer: Google's gtx endpoint, then clients5."""
     try:
-        r = None if _OFFLINE_ONLY else smart_request(
+        r = smart_request(
             "GET",
             "https://translate.googleapis.com/translate_a/single",
             params=[("client", "gtx"), ("sl", "en"), ("tl", "fa"), ("dt", "t"), ("dt", "bd"), ("q", clean)],
             timeout=2.8,
         )
-        if r is not None and r.ok:
+        if r.ok:
             data = r.json()
             if is_short and len(data) > 1 and isinstance(data[1], list):
                 terms = []
@@ -1097,9 +1219,9 @@ def _google_translate(clean: str, is_short: bool) -> str:
                             if cand and cand not in terms:
                                 terms.append(cand)
                 if terms:
-                    return " \u060c ".join(terms[:2])
+                    return " ، ".join(terms[:2])
             res = "".join(seg[0] for seg in data[0] if seg and seg[0]).strip()
-            if res and re.search(r"[\u0600-\u06FF]", res):
+            if res and re.search(r"[؀-ۿ]", res):
                 norm = normalize_persian(res, is_short_term=is_short, source_en=clean)
                 if norm:
                     return norm
@@ -1108,28 +1230,76 @@ def _google_translate(clean: str, is_short: bool) -> str:
     return translate_via_clients5(clean, is_short=is_short)
 
 
+def _online_translation(clean: str, is_short: bool) -> str:
+    """Google's translation, remembered forever once it comes. "" without internet, at once (see is_online)."""
+    if not network_allowed():
+        return ""
+    fa = _google_translate(clean, is_short)
+    if fa:
+        _remember(clean, fa, FA_SOURCE_GOOGLE, QUALITY_GOOGLE, is_short)
+    return fa
+
+
+def quick_translation(text: str, is_short: bool = False) -> Tuple[str, str]:
+    """What is known without asking anyone: your edits, the local database's human translations and Wiktionary
+    equivalents, anything already cached. For the first, instant view of an entry."""
+    clean = text.strip()
+    override = USER_MEMORY.get("overrides", {}).get(clean.lower())
+    if override:
+        return override, FA_SOURCE_EDIT
+    fa, source = local_phrase_translation(clean, is_short)
+    if fa:
+        return fa, source
+    cached = TRANSLATION_CACHE.get(clean, _kind(is_short))
+    if cached and cached[2] >= QUALITY_GOOGLE:
+        return cached[0], cached[1]
+    fa, source = local_word_translation(clean)
+    if fa:
+        return fa, source
+    return (cached[0], cached[1]) if cached else ("", "")
+
+
 def translate_with_source(text: str, is_short: bool = False, use_slm: bool = False) -> Tuple[str, str]:
-    """(Persian, source) through the tiers: your edits, the local database, Google when online, then offline
-    the language model (with use_slm: for the headword, an idiom or a sentence; it takes a second or two)
-    and the NLLB translator. ("", "") when nothing translates it."""
+    """(Persian, source) through the tiers; ("", "") when nothing translates it.
+
+    1. your edits; 2. a pre-translated idiom, or the text found whole in a subtitle/Tatoeba pair (human
+       translations: machines are never asked for these); 3. the permanent cache, when it holds Google's answer;
+    4. online, Google Translate (cached for good, so the next lookup is instant and works offline); 5. a word's
+       Wiktionary equivalents that people actually say; 6. any cached machine translation; 7. offline, the local
+       language model (with use_slm: for the headword, an idiom or a sentence; it takes a second or two) and the
+       NLLB translator, each cached for good. During a Refresh the cache is not trusted: Google is asked again."""
     clean = text.strip()
     if not clean:
         return "", ""
     override = USER_MEMORY.get("overrides", {}).get(clean.lower())
     if override:
         return override, FA_SOURCE_EDIT
-    fa, source = local_translation(clean, is_short=is_short)
+    fa, source = local_phrase_translation(clean, is_short)
     if fa:
         return fa, source
-    fa = "" if _OFFLINE_ONLY else _google_translate(clean, is_short)
+    cached = TRANSLATION_CACHE.get(clean, _kind(is_short))
+    if cached and cached[2] >= QUALITY_GOOGLE and not _REFRESHING.get():
+        return cached[0], cached[1]
+    fa = _online_translation(clean, is_short)
     if fa:
         return fa, FA_SOURCE_GOOGLE
+    if cached and cached[2] >= QUALITY_GOOGLE:  # a Refresh that could not reach Google keeps what it had
+        return cached[0], cached[1]
+    fa, source = local_word_translation(clean)
+    if fa:
+        return fa, source
+    if cached:
+        return cached[0], cached[1]
     if use_slm:
         fa = normalize_persian(SLM.translate(clean), is_short_term=is_short, source_en=clean)
         if fa:
+            _remember(clean, fa, FA_SOURCE_SLM, QUALITY_SLM, is_short)
             return fa, FA_SOURCE_SLM
     fa = translate_offline_backup(clean, is_short=is_short)
-    return (fa, FA_SOURCE_NLLB) if fa else ("", "")
+    if fa:
+        _remember(clean, fa, FA_SOURCE_NLLB, QUALITY_NLLB, is_short)
+        return fa, FA_SOURCE_NLLB
+    return "", ""
 
 
 def translate_single_string(text: str, is_short: bool = False) -> str:
@@ -1139,7 +1309,7 @@ def translate_single_string(text: str, is_short: bool = False) -> str:
 
 def fetch_persian_word_meaning(term: str, is_idiom: bool = False, use_slm: Optional[bool] = None) -> Tuple[str, str]:
     """(Persian, source) for a looked-up word or phrase; your taught entries come right after your edits.
-    The language model is asked for an idiom unless use_slm says otherwise."""
+    The language model is asked for an idiom unless use_slm says otherwise (and only when no table had it)."""
     low = term.strip().lower()
     taught = USER_MEMORY.get("entries", {}).get(low, {}).get("fa", "")
     if taught and low not in USER_MEMORY.get("overrides", {}):
@@ -1148,29 +1318,38 @@ def fetch_persian_word_meaning(term: str, is_idiom: bool = False, use_slm: Optio
 
 
 def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[str, str]:
-    """Persian for many strings at once: local first, then one Google request for the remaining sentences, then
-    Google for each leftover, then the NLLB translator for the rest in one batch (the language model is too
-    slow for a batch)."""
+    """Persian for many strings at once: your edits and human translations first, then the cache, then Google (one
+    request for the remaining sentences, one per leftover; cached for good), then Wiktionary's everyday
+    equivalents for words, then the NLLB translator for the rest in one batch (the language model is too slow
+    for a batch; its results too are cached)."""
     all_items = [x.strip() for x in dict.fromkeys(sentences + short_terms) if x and x.strip()]
     if not all_items:
         return {}
 
     short_set = {x.strip() for x in short_terms}
+    refresh = _REFRESHING.get()
     out: Dict[str, str] = {}
-    remaining_sentences: List[str] = []
-    remaining_shorts: List[str] = []
+    cached_low: Dict[str, str] = {}
+    pending: List[str] = []
 
     for item in all_items:
+        is_short = item in short_set
         override = USER_MEMORY.get("overrides", {}).get(item.lower())
-        local = override or local_translation(item, is_short=item in short_set)[0]
+        local = override or local_phrase_translation(item, is_short)[0]
         if local:
             out[item] = local
-        elif item in short_set:
-            remaining_shorts.append(item)
-        else:
-            remaining_sentences.append(item)
+            continue
+        cached = TRANSLATION_CACHE.get(item, _kind(is_short))
+        if cached and cached[2] >= QUALITY_GOOGLE and not refresh:
+            out[item] = cached[0]
+            continue
+        if cached:
+            cached_low[item] = cached[0]
+        pending.append(item)
 
-    if remaining_sentences and not _OFFLINE_ONLY:  # offline: each one goes to the local model below
+    online = bool(pending) and network_allowed()
+    remaining_sentences = [x for x in pending if x not in short_set]
+    if online and len(remaining_sentences) > 1:
         joined = "\n".join(remaining_sentences)
         try:
             r = smart_request(
@@ -1188,18 +1367,29 @@ def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[s
                     for orig, tr in zip(remaining_sentences, lines):
                         if tr:
                             out[orig] = tr
+                            _remember(orig, tr, FA_SOURCE_GOOGLE, QUALITY_GOOGLE, False)
         except Exception:
             _log_failure("Batch translation failed")
 
-    still_missing = [x for x in (remaining_sentences + remaining_shorts) if not out.get(x)]
-    if still_missing and not _OFFLINE_ONLY:  # Google, one at a time
+    still_missing = [x for x in pending if not out.get(x)]
+    if online and still_missing:  # Google, one at a time
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futs = {item: submit_in_context(pool, _google_translate, item, item in short_set) for item in still_missing}
+            futs = {item: submit_in_context(pool, _online_translation, item, item in short_set) for item in still_missing}
             for item, fut in futs.items():
-                out[item] = fut.result()
+                if fut.result():
+                    out[item] = fut.result()
+    still_missing = [x for x in still_missing if not out.get(x)]
+    for item in list(still_missing):  # Wiktionary's everyday equivalents, else what an earlier offline guess cached
+        fa = local_word_translation(item)[0] if item in short_set else ""
+        fa = fa or cached_low.get(item, "")
+        if fa:
+            out[item] = fa
     still_missing = [x for x in still_missing if not out.get(x)]
     for item, fa in zip(still_missing, _ct2_translate_many(still_missing)):  # the rest offline, in one batch
-        out[item] = normalize_persian(fa, is_short_term=item in short_set, source_en=item) if fa else ""
+        is_short = item in short_set
+        out[item] = normalize_persian(fa, is_short_term=is_short, source_en=item) if fa else ""
+        if out[item]:
+            _remember(item, out[item], FA_SOURCE_NLLB, QUALITY_NLLB, is_short)
     for item in still_missing:
         if not out[item] and item in short_set:
             out[item] = NOT_FOUND_FA
@@ -1208,17 +1398,18 @@ def translate_batch_fast(sentences: List[str], short_terms: List[str]) -> Dict[s
 
 # === SECTION 7: SENTENCE KEY-TERM EXTRACTOR & MULTI-DICTIONARY ANALYZERS ===
 def first_definition(term: str) -> Tuple[str, str]:
-    """(part of speech, definition) of a term's first Wiktionary sense, else its first WordNet sense, else ("", "")."""
-    for e in LEXICON.entries(term):
+    """(part of speech, definition) of a term's most ordinary Wiktionary sense, else ("", "")."""
+    best: Optional[Tuple[int, str, str]] = None
+    entries = LEXICON.entries(term)
+    many_pos = len({e["pos"] for e in entries}) > 1
+    for e in entries:
         for sense in e["senses"]:
-            if not is_grammatical_form_of_gloss(sense["def"]):
-                return e["pos"], clean_english_sentence(sense["def"])
-    if wn:
-        syns = wn.synsets("_".join(term.lower().split()))
-        if syns:
-            pos_map = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
-            return pos_map.get(syns[0].pos(), "Word"), clean_english_sentence(syns[0].definition())
-    return "", ""
+            if is_grammatical_form_of_gloss(sense["def"]):
+                continue
+            klass = lt.sense_class(sense.get("tags", []), sense["def"], e["pos"], many_pos)
+            if best is None or klass < best[0]:
+                best = (klass, e["pos"], clean_english_sentence(lt.display_definition(sense["def"], sense.get("tags", []))))
+    return (best[1], best[2]) if best else ("", "")
 
 
 def extract_sentence_key_terms(sentence: str) -> List[Dict[str, str]]:
@@ -1246,7 +1437,7 @@ def extract_sentence_key_terms(sentence: str) -> List[Dict[str, str]]:
                     or all(t in STOPWORDS for t in low_tokens[i:i + n]):
                 continue  # "the storm" is just "storm"
             phrase = " ".join(low_tokens[i:i + n])
-            if LEXICON.has_entry(phrase) or (wn and wn.synsets(phrase.replace(" ", "_"))):
+            if LEXICON.has_entry(phrase):
                 pos, definition = first_definition(phrase)
                 if definition:
                     covered.update(span)
@@ -1258,11 +1449,7 @@ def extract_sentence_key_terms(sentence: str) -> List[Dict[str, str]]:
             break
         if i in covered or len(low_t) < 3 or low_t in STOPWORDS:
             continue
-        lemma = low_t
-        if LEMMATIZER:
-            lemma = LEMMATIZER.lemmatize(low_t, "v")
-            if lemma == low_t:
-                lemma = LEMMATIZER.lemmatize(low_t, "n")
+        lemma = lemmatize(low_t)
         if lemma in STOPWORDS or lemma in seen:
             continue
         pos, definition = first_definition(lemma)
@@ -1288,33 +1475,29 @@ def fetch_live_suggestions(prefix: str) -> List[str]:
     return list(dict.fromkeys(user_keys + LEXICON.suggestions(q)))[:7]
 
 
-def fetch_verified_example_for_relation(word: str, target_pos: str = "") -> str:
-    """A real example sentence for a synonym or antonym: WordNet's (of the wanted part of speech first),
-    then Wiktionary's, then a corpus sentence; "" when none contains the word."""
+def relation_example(word: str, target_pos: str = "") -> Tuple[str, str]:
+    """(English, Persian) example for a synonym or antonym, routed like every example: a subtitle line first (with
+    its human translation), then a usage example from Wiktionary (of the wanted part of speech first), then a
+    Tatoeba sentence. ("", "") when none contains the word; damaged or archaic text is never used."""
     clean = word.strip()
-    pos_code_map = {"Noun": "n", "Verb": "v", "Adjective": "a", "Adverb": "r"}
-    want_pos = pos_code_map.get(target_pos, "")
-
-    if wn:
-        try:
-            synsets = wn.synsets("_".join(clean.split()))
-            ranked = [s for s in synsets if not want_pos or s.pos().replace("s", "a") == want_pos] + synsets[:4]
-            for syn in ranked:
-                for ex in syn.examples():
-                    if sentence_contains_target(ex, clean) and len(ex.split()) >= 5:
-                        return clean_english_sentence(ex)
-        except Exception:
-            _log_failure(f"WordNet example lookup failed for {word!r}")
-
+    for ex in LEXICON.examples(clean, "opensubtitles", limit=1):
+        return ex["en"], ex["fa"]
     entries = LEXICON.entries(clean)
     entries.sort(key=lambda e: e["pos"] != target_pos)
+    is_known = LEXICON.known_word if LEXICON.vocabulary_ok() else None
     for e in entries:
         for sense in e["senses"]:
-            if sense["example"] and sentence_contains_target(sense["example"], clean):
-                return clean_english_sentence(sense["example"])
-    for ex in LEXICON.examples(clean, limit=1):
-        return ex["en"]
-    return ""
+            ex = lt.clean_example(sense.get("example", ""), is_known=is_known, target=clean)
+            if ex and sentence_contains_target(ex, clean):
+                return clean_english_sentence(ex), ""
+    for ex in LEXICON.examples(clean, "tatoeba", limit=1):
+        return ex["en"], ex["fa"]
+    return "", ""
+
+
+def fetch_verified_example_for_relation(word: str, target_pos: str = "") -> str:
+    """The English of relation_example()."""
+    return relation_example(word, target_pos)[0]
 
 
 def is_grammatical_form_of_gloss(text: str) -> bool:
@@ -1373,7 +1556,7 @@ def reverse_lookup_local(fa: str) -> List[str]:
 
 def _google_fa_to_en(text: str) -> Tuple[str, List[Dict[str, str]]]:
     """(full translation, dictionary candidates grouped by part of speech) from Google's gtx endpoint."""
-    if _OFFLINE_ONLY:
+    if not network_allowed():
         return "", []
     try:
         r = smart_request(
@@ -1458,50 +1641,202 @@ def analyze_persian(raw: str) -> Dict[str, Any]:
 
 def lookup_cefr_level(term: str) -> str:
     """CEFR level of a word or phrase from the bundled list, '' if unlisted. An inflected form that is
-    not listed itself ('running', 'mice') takes its WordNet lemma's level."""
-    lemmas: List[str] = []
-    if LEMMATIZER and term.isalpha():
-        try:
-            lemmas = [LEMMATIZER.lemmatize(term.lower(), pos=p) for p in ("n", "v", "a", "r")]
-        except LookupError:  # the WordNet data is not installed: the exact word is all we can try
-            _log_failure(f"WordNet lemmatizer unavailable for the level of {term!r}")
+    not listed itself ('running', 'mice') takes its lemma's level (Wiktionary's, or by suffix rules)."""
+    lemmas = lemma_candidates(term) if term.isalpha() else []
     return word_levels.cefr_level(CEFR_LEVELS_FILE, term, lemmas) or ""
 
 
-PENDING_FA = "\u2026"  # "…": in a preview, Persian that is still being translated
+PENDING_FA = "…"  # "…": in a preview, Persian that is still being translated
+
+# What a word page shows (spec 5.C): a few ordinary senses, a few everyday relations.
+MAX_SENSES_SHOWN = 3       # one or two senses usually, three at most (a second part of speech may add one)
+MAJOR_POS = {"Noun", "Verb", "Adjective", "Adverb"}
+MAX_SYNONYMS = 5
+MAX_ANTONYMS = 5
+RELATIONS_PER_SENSE = 3
+EXAMPLE_CORPUS_NAMES = {"opensubtitles": "OpenSubtitles", "tatoeba": "Tatoeba"}
 
 
-def analyze_with_dictionaries(term: str, on_preview: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
+def analyze_with_dictionaries(term: str, on_preview: Optional[Callable[[Dict[str, Any]], None]] = None,
+                              refresh: bool = False) -> Dict[str, Any]:
     """The entry for a word, phrase or sentence (English or Persian). For a word or phrase, on_preview gets the
     entry built from local data alone (definitions, examples, IPA, the local Persian) as soon as the sources
-    have answered, with PENDING_FA where Persian is still to come; the full entry is returned afterwards."""
-    ensure_wordnet()  # waits for a preload in progress instead of loading WordNet a second time
-    with lookup_request_cache():  # identical requests within this one lookup reach the network once
-        return _analyze_with_dictionaries(term, on_preview)
+    have answered, with PENDING_FA where Persian is still to come; the full entry is returned afterwards.
+
+    A first lookup already returns the best result there is: Google's translation when online (cached for good,
+    so the same word is instant and offline next time), the local resources otherwise. With refresh=True the
+    online resources are asked again whatever is cached (the connection is probed afresh, Google is asked for
+    every translation and its answer replaces the cached one) and the entry carries "refresh_info":
+    {"online": bool} (False: there was no internet, the result is the local one again)."""
+    token = _REFRESHING.set(refresh)
+    try:
+        if refresh:
+            forget_connectivity()
+        with lookup_request_cache():  # identical requests within this one lookup reach the network once
+            data = _analyze_with_dictionaries(term, on_preview)
+        if refresh:
+            data["refresh_info"] = {"online": network_allowed()}
+        return data
+    finally:
+        _REFRESHING.reset(token)
 
 
 def _empty_morphology(term: str) -> Dict[str, Any]:
     return {"root": term, "structure": term, "prefix": "None", "suffix": "None", "family": []}
 
 
-def _relation_items(items: List[Dict[str, str]], clean: str, root_lemma: str, limit: int, per_sense: int) -> List[Dict[str, str]]:
-    """Synonyms or antonyms, unique and grouped by sense: at most `per_sense` from one sense, `limit` in all."""
+def _term_frequency(term: str) -> float:
+    """Subtitle frequency of a word, of a phrase's rarest word; 0 when unknown."""
+    tokens = re.findall(r"[a-z]+(?:'[a-z]+)?", term.lower())
+    return min((LEXICON.frequency(t) or 0.0) for t in tokens) if tokens else 0.0
+
+
+def choose_senses(senses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The senses to show, from every sense the sources gave (in their order, each with a "klass"; see
+    lexicon_text.sense_class): the most ordinary ones, one or two (three at most). Specialist senses
+    (mathematics, linguistics, anatomy, law...) and archaic, obsolete, rare, historical ones or "A surname" are
+    left out while anything ordinary exists. The first sense and a second of its part of speech are taken;
+    when the word has another common part of speech (noun and verb), that one's first sense is taken as well,
+    so at most three come out, usually two. A sense that says what an earlier one says is skipped."""
+    cands = [s for s in senses if not is_grammatical_form_of_gloss(s["def"])]
+    for ceiling in (1, 2, 3):  # ordinary (and slang) first; specialist only if nothing else; archaic last
+        pool = sorted((s for s in cands if s.get("klass", 0) <= ceiling), key=lambda s: s.get("klass", 0))
+        if pool:
+            break
+    else:
+        return []
+    shown: List[Dict[str, Any]] = []
+
+    def fresh(s: Dict[str, Any]) -> bool:
+        return not any(is_similar_def(s["def"], t["def"]) for t in shown)
+
+    forced = [s for s in pool if s.get("klass", 0) < 0]  # your own taught senses always come first
+    shown += forced
+    first = next((s for s in pool if s.get("klass", 0) >= 0 and fresh(s)), None)
+    if first:
+        shown.append(first)
+        second = next((s for s in pool if s is not first and s["pos"] == first["pos"] and s["pos"] != "Slang"
+                       and s.get("klass", 0) == first.get("klass", 0) and fresh(s)), None)
+        other = next((s for s in pool if s["pos"] != first["pos"] and s["pos"] in MAJOR_POS and s.get("klass", 0) == 0
+                      and not lt.tag_set(s.get("tags", [])) & lt.UNCOMMON_USAGE and fresh(s)), None)
+        shown += [s for s in (second, other) if s]
+        slang = next((s for s in pool if s["pos"] == "Slang" and s not in shown and fresh(s)), None)
+        if slang and len(shown) < MAX_SENSES_SHOWN:
+            shown.append(slang)
+    return shown[:max(MAX_SENSES_SHOWN, len(forced))]
+
+
+_BEFORE_NOUN = r"(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their|some|any|no|every|each|one|another)"
+_BEFORE_VERB = r"(?:to|i|you|we|they|he|she|it|who|that|will|would|can|could|shall|should|must|may|might|do|does|did|don't|didn't|doesn't|won't|can't|not|never|let's|gonna|wanna)"
+
+
+def _fits_pos(sentence: str, pos: str, forms: List[str]) -> bool:
+    """A rough test that the word is used as the part of speech of a sense in a sentence ("run" as a noun after "a",
+    "the"; as a verb after "to", "I", "will" or in an inflected form), so that a verb sense is not shown with a noun's
+    sentence. Adjectives, adverbs and the rest are not judged (True)."""
+    low = sentence.lower()
+    alt = "|".join(re.escape(f) for f in forms if f)
+    if not alt or pos not in ("Noun", "Verb"):
+        return True
+    if pos == "Noun":
+        return bool(re.search(rf"\b{_BEFORE_NOUN}\s+(?:\w+\s+)?(?:{alt})s?\b", low) or re.search(rf"\b(?:{alt})s\b", low))
+    base = forms[0]
+    inflected = [f for f in forms[1:] if f != base]
+    if inflected and re.search(rf"\b(?:{'|'.join(re.escape(f) for f in inflected)})\b", low):
+        return True
+    return bool(re.search(rf"\b{_BEFORE_VERB}\s+(?:\w+\s+)?{re.escape(base)}\b", low))
+
+
+def _assign_examples(shown: List[Dict[str, Any]], merged: Any, clean: str) -> None:
+    """Gives each shown sense its example, in place: a subtitle line (OpenSubtitles, the primary source: natural
+    dialogue, with its human Persian translation), else the sense's own Wiktionary example, else a Tatoeba
+    sentence; never made up, never reused. Subtitle lines have no sense label, so the one that shares the most
+    words with the definition goes to the sense; after the first sense, a subtitle line that shares none loses
+    to the sense's own Wiktionary example (which is surely about that sense)."""
+    containing = [e for e in merged.examples if sentence_contains_target(e["en"], clean)]
+    forms = [clean.lower()] + [f["form"].lower() for f in merged.forms]
+    subs = [e for e in containing if e.get("corpus") == "opensubtitles"]
+    tato = [e for e in containing if e.get("corpus") != "opensubtitles"]
+    used: set = set()
+    for idx, s in enumerate(shown):
+        s.setdefault("example_fa", "")
+        s["example_source"] = ""
+        own = s.get("example_en", "").strip()
+        if s.get("klass", 0) < 0:  # taught by the user: as given
+            s["example_source"] = "your entry" if own else ""
+            if own:
+                used.add(own.lower())
+            continue
+        gloss_words = lt.content_words(s["def"])
+        free = [e for e in subs if e["en"].lower() not in used]
+        best = max(free, key=lambda e: (_fits_pos(e["en"], s.get("pos", ""), forms), len(lt.content_words(e["en"]) & gloss_words)),
+                   default=None)  # first on ties
+        overlap = len(lt.content_words(best["en"]) & gloss_words) if best else 0
+        s["example_en"], s["example_fa"] = "", ""
+        if best and (overlap > 0 or idx == 0 or not own or own.lower() in used):
+            s["example_en"], s["example_fa"], s["example_source"] = best["en"], best["fa"], "OpenSubtitles"
+        elif own and own.lower() not in used:
+            s["example_en"], s["example_source"] = own, "Wiktionary"
+        else:
+            pick = next((e for e in tato if e["en"].lower() not in used), None)
+            if pick:
+                s["example_en"], s["example_fa"], s["example_source"] = pick["en"], pick["fa"], "Tatoeba"
+        if s["example_en"]:
+            used.add(s["example_en"].lower())
+
+
+def _sense_label(s: Dict[str, Any]) -> str:
+    return f"{s['pos'].lower()}: {s['def'].rstrip('.')}"
+
+
+def _is_ordinary_word(term: str) -> bool:
+    """False for a word whose Wiktionary entry has only archaic, regional, specialist or name senses ("bonnie",
+    "noetic"): it is no everyday synonym even if some subtitle line has it (a name). A term with no entry (a
+    phrase) is left to the frequency test."""
+    entries = [e for e in LEXICON.entries(term) if e["senses"]]
+    if not entries:
+        return True
+    many_pos = len({e["pos"] for e in entries}) > 1
+    return any(lt.sense_class(s.get("tags", []), s["def"], e["pos"], many_pos) < 2 for e in entries for s in e["senses"])
+
+
+def _shown_relations(items: List[Dict[str, Any]], shown: List[Dict[str, Any]], clean: str, root_lemma: str,
+                     limit: int) -> List[Dict[str, str]]:
+    """Synonyms or antonyms of the senses actually shown, each group under its sense ("noun: A playing card..."):
+    only words Wiktionary lists for that sense (or, for an entry-level word with a hint, for the sense the hint
+    describes; without a hint, for the first ordinary sense of its part of speech), everyday words only (those
+    Wiktionary labels archaic, rare, dated and the like, or nobody says in subtitles, are dropped), the most
+    common first, a few per sense. Never filled up: fewer is fine, none is fine."""
+    groups: Dict[int, List[Dict[str, Any]]] = {}
+    for it in items:
+        idx = None
+        if it["raw_def"]:
+            idx = next((i for i, s in enumerate(shown) if s.get("raw_def") == it["raw_def"] and s["pos"] == it["pos"]), None)
+        else:
+            same_pos = [i for i, s in enumerate(shown) if s["pos"] == it["pos"] and s.get("raw_def") is not None]
+            if it["hint"]:
+                hint = lt.content_words(it["hint"])
+                best = max(same_pos, key=lambda i: len(hint & lt.content_words(shown[i]["def"] + " " + shown[i]["raw_def"])), default=None)
+                idx = best if best is not None and hint & lt.content_words(shown[best]["def"] + " " + shown[best]["raw_def"]) else None
+            else:
+                idx = next((i for i in same_pos if shown[i].get("klass", 0) == 0), None)
+        if idx is not None:
+            groups.setdefault(idx, []).append(it)
     out: List[Dict[str, str]] = []
     seen: set = set()
-    per: Dict[str, int] = {}
-    for it in items:
-        term, sense = it["term"], it.get("sense", "")
-        if term.lower() in seen or is_spelling_or_root_duplicate(term, clean, root_lemma) or term.lower() in WEAK_SYNONYMS:
-            continue
-        if per.get(sense, 0) >= per_sense:
-            continue
-        seen.add(term.lower())
-        per[sense] = per.get(sense, 0) + 1
-        out.append({"term": term, "sense": sense})
-        if len(out) >= limit:
-            break
-    order = list(dict.fromkeys(i["sense"] for i in out))
-    return sorted(out, key=lambda it: order.index(it["sense"]))  # each sense's words together
+    for idx in sorted(groups):
+        ranked = []
+        for it in groups[idx]:
+            term = " ".join(it["term"].split())
+            if (not term or term.lower() in seen or term.lower() in WEAK_SYNONYMS or is_spelling_or_root_duplicate(term, clean, root_lemma)
+                    or not lt.relation_tags_ok(it["tags"].split()) or not is_everyday_term(term) or not _is_ordinary_word(term)):
+                continue
+            seen.add(term.lower())
+            ranked.append((-_term_frequency(term), len(ranked), term))
+        for _, _, term in sorted(ranked)[:RELATIONS_PER_SENSE]:
+            if len(out) < limit:
+                out.append({"term": term, "sense": _sense_label(shown[idx])})
+    return out
 
 
 def _analyze_sentence(clean: str) -> Dict[str, Any]:
@@ -1518,7 +1853,10 @@ def _analyze_sentence(clean: str) -> Dict[str, Any]:
         "senses": [],
         "sentence_breakdown": key_terms,
         "collocations": [],
+        "common_expressions": [],
         "derived_terms": [],
+        "forms": [],
+        "alternatives": [],
         "morphology": _empty_morphology(clean),
         "synonyms": [],
         "antonyms": [],
@@ -1530,30 +1868,44 @@ def _analyze_with_dictionaries(term: str, on_preview: Optional[Callable[[Dict[st
     if is_persian_text(raw_input):
         return analyze_persian(raw_input)
     words = raw_input.split()
-    is_full_sentence = len(words) >= 5 or (len(words) >= 4 and raw_input.endswith((".", "!", "?")))
+    # Idioms first (spec 6.A): the whole phrase is looked up as typed, then normalised (it/someone/one's, a/the/no,
+    # inflections) against the multi-word entries, before anything is split into words or taken for a sentence.
+    match = LEXICON.match_phrase(raw_input) if len(words) >= 2 else None
+    is_full_sentence = (len(words) >= 5 or (len(words) >= 4 and raw_input.endswith((".", "!", "?")))) and not match
     clean = auto_correct_english_input(raw_input, is_sentence=is_full_sentence)
     if is_full_sentence:
         return _analyze_sentence(clean)
 
     # --- WORD OR PHRASE ---
     is_idiom_or_phrase = len(words) >= 2
+    typed = clean
+    phrase_match: Optional[Dict[str, Any]] = None
+    if match and lexicon_db.text_key(match["entry"]) != lexicon_db.text_key(clean):
+        clean = match["entry"]  # the page is the dictionary's entry, not the typed variation of it
+        phrase_match = {"typed": typed, "entry": clean, "dropped": match["dropped"], "negated": match["negated"]}
     morphology = analyze_morphology(clean) if not is_idiom_or_phrase else _empty_morphology(clean)
     root_lemma = morphology.get("root", clean)
 
     sources = _dictionary_sources()
-    ctx = sources.LookupContext(term=clean, is_idiom=is_idiom_or_phrase, root_lemma=root_lemma)
+    ctx = sources.LookupContext(term=clean, is_idiom=is_idiom_or_phrase, root_lemma=root_lemma,
+                                typed=typed if phrase_match else "")
     fa_pool = ThreadPoolExecutor(max_workers=1)  # the headword's Persian, possibly slow (Google, the models)
     try:
-        f_fa = submit_in_context(fa_pool, fetch_persian_word_meaning, clean, is_idiom_or_phrase)
+        f_fa = submit_in_context(fa_pool, fetch_persian_word_meaning, typed, is_idiom_or_phrase)
         merged = sources.REGISTRY.run(ctx)  # every enabled dictionary source, merged in registry order
-        return _build_word_entry(clean, words, is_idiom_or_phrase, morphology, root_lemma, merged, f_fa, on_preview)
+        data = _build_word_entry(clean, words, is_idiom_or_phrase, morphology, root_lemma, merged, f_fa, on_preview, typed)
+        if phrase_match:
+            data["phrase_match"] = phrase_match
+        return data
     finally:
         fa_pool.shutdown(wait=False)
 
 
 def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, morphology: Dict[str, Any], root_lemma: str,
-                      merged: Any, f_fa: Any, on_preview: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
+                      merged: Any, f_fa: Any, on_preview: Optional[Callable[[Dict[str, Any]], None]],
+                      typed: str = "") -> Dict[str, Any]:
     low = clean.lower()
+    typed = typed or clean
 
     did_you_mean = ""
     if not merged.senses and len(words) == 1:
@@ -1563,7 +1915,7 @@ def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, mo
 
     ipa_us = merged.ipa_us or to_ipa_us(clean)
 
-    priority_senses: List[Dict[str, str]] = []
+    priority_senses: List[Dict[str, Any]] = []
     if low in USER_MEMORY.get("entries", {}):
         ue = USER_MEMORY["entries"][low]
         if ue.get("def"):
@@ -1572,63 +1924,19 @@ def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, mo
                 "def": ue["def"],
                 "example_en": ue.get("example_en", ""),
                 "example_fa": ue.get("example_fa", ""),
+                "klass": -1,
             })
 
-    all_raw_senses = priority_senses + merged.senses
-    # Corpus sentences pair an example with its human translation; one containing the term is used for a
-    # sense that has no example of its own.
-    corpus_examples = [tp for tp in merged.examples if sentence_contains_target(tp["en"], clean)]
-
-    used_examples = set()
-    selected_senses: List[Dict[str, str]] = []
-
-    def pick_example(s: Dict[str, str]) -> Tuple[str, str]:
-        ex_en = s.get("example_en", "").strip()
-        ex_fa = s.get("example_fa", "").strip()
-        if ex_en and ex_en.lower() in used_examples:
-            ex_en, ex_fa = "", ""
-        if not ex_en:
-            for tp in corpus_examples:
-                if tp["en"].lower() not in used_examples:
-                    ex_en, ex_fa = tp["en"], tp["fa"]
-                    break
-        if ex_en:
-            used_examples.add(ex_en.lower())
-        return ex_en, ex_fa
-
-    for s in all_raw_senses:
-        d_txt = s["def"]
-        if is_grammatical_form_of_gloss(d_txt) or any(is_similar_def(d_txt, ex["def"]) for ex in selected_senses):
-            continue
-        ex_en, ex_fa = pick_example(s)
-        selected_senses.append({
-            "pos": "Idiom / Expression" if is_idiom_or_phrase and s.get("pos") != "Slang" else s.get("pos", "Noun"),
-            "def": d_txt,
-            "example_en": ex_en,
-            "example_ipa": "",  # filled in by entry()
-            "example_fa": ex_fa,
-        })
-        if len(selected_senses) >= 3:
-            break
-
-    # One sense of each further part of speech (a verb sense of "bank", a slang sense), up to two more.
-    existing_pos = {s["pos"] for s in selected_senses}
-    for s in all_raw_senses:
-        s_pos = s.get("pos", "")
-        if len(selected_senses) >= 5:
-            break
-        if s_pos and s_pos not in existing_pos and (not is_idiom_or_phrase or s_pos == "Slang") \
-                and not is_grammatical_form_of_gloss(s["def"]):
-            ex_en, ex_fa = pick_example(s)
-            selected_senses.append({
-                "pos": s_pos,
-                "def": s["def"],
-                "example_en": ex_en,
-                "example_ipa": "",
-                "example_fa": ex_fa,
-            })
-            existing_pos.add(s_pos)
-
+    shown = choose_senses(priority_senses + merged.senses)
+    _assign_examples(shown, merged, clean)
+    selected_senses = [{
+        "pos": "Idiom / Expression" if is_idiom_or_phrase and s.get("pos") != "Slang" else s.get("pos", "Noun"),
+        "def": s["def"],
+        "example_en": s["example_en"],
+        "example_ipa": "",  # filled in by entry()
+        "example_fa": s["example_fa"],
+        "example_source": s["example_source"],
+    } for s in shown]
     primary_pos = selected_senses[0]["pos"] if selected_senses else "Noun"
 
     colls_raw: List[Dict[str, str]] = []
@@ -1638,20 +1946,29 @@ def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, mo
             t = c["term"].strip()
             if t.lower() not in seen_col and t.lower() != low:
                 seen_col.add(t.lower())
-                example = c["example_en"] or next(iter(ex["en"] for ex in LEXICON.examples(t, limit=1)), "")
-                colls_raw.append({"term": t, "example_en": example})
+                ex_en, ex_fa = (c["example_en"], "") if c["example_en"] else relation_example(t)
+                colls_raw.append({"term": t, "example_en": ex_en, "example_fa": ex_fa})
             if len(colls_raw) >= 4:
                 break
 
-    syn_items = _relation_items(merged.syns, clean, root_lemma, limit=6, per_sense=2)
-    ant_items = _relation_items(merged.ants, clean, root_lemma, limit=3, per_sense=3)
+    syn_items = _shown_relations(merged.syns, shown, clean, root_lemma, MAX_SYNONYMS)
+    ant_items = _shown_relations(merged.ants, shown, clean, root_lemma, MAX_ANTONYMS)
     with ThreadPoolExecutor(max_workers=6) as pool:
-        ex_futs = {it["term"]: submit_in_context(pool, fetch_verified_example_for_relation, it["term"], primary_pos)
-                   for it in syn_items + ant_items}
+        ex_futs = {it["term"]: submit_in_context(pool, relation_example, it["term"], primary_pos) for it in syn_items + ant_items}
         for it in syn_items + ant_items:
-            it["example_en"] = ex_futs[it["term"]].result()
+            it["example_en"], it["example_fa"] = ex_futs[it["term"]].result()
 
-    derived = [d for d in dict.fromkeys(merged.derived) if d.lower() != low][:12] if not is_idiom_or_phrase else []
+    common: List[str] = []
+    forms: List[Dict[str, str]] = []
+    alternatives: List[str] = []
+    if not is_idiom_or_phrase:
+        common = common_expressions(clean, merged.derived, [c["term"] for c in merged.collocations])
+        forms = [f for f in merged.forms if f["form"].lower() != low][:6]
+        alternatives = [a for a in dict.fromkeys(merged.alternatives)
+                        if a.isalpha() and a.lower() != low and a.lower() == a and is_everyday_word(a)][:MAX_ALTERNATIVES]
+        morphology = dict(morphology, family=_word_family(
+            root_lemma, low, merged.derived, merged.related,
+            lambda w: next((e["pos"] for e in LEXICON.entries(w) if e["senses"]), "")))
 
     core_idiom_meaning_en = ""
     if is_idiom_or_phrase and selected_senses:
@@ -1669,7 +1986,7 @@ def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, mo
                 "fa": fa(item["term"]),
                 "example_en": ex,
                 "example_ipa": (pending or sentence_to_ipa(ex)) if ex else "",
-                "example_fa": fa(ex) if ex else "",
+                "example_fa": (item.get("example_fa") or fa(ex)) if ex else "",
             }
             if "sense" in item:
                 out["sense"] = item["sense"]
@@ -1688,7 +2005,10 @@ def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, mo
                        for s in selected_senses],
             "sentence_breakdown": [],
             "collocations": [related(c) for c in colls_raw],
-            "derived_terms": derived,
+            "common_expressions": common,
+            "derived_terms": common,  # the former name of common_expressions, kept for entries saved by older versions' readers
+            "forms": forms,
+            "alternatives": alternatives,
             "morphology": morphology,
             "cefr_level": lookup_cefr_level(clean),
             "frequency_per_million": merged.frequency,
@@ -1700,11 +2020,11 @@ def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, mo
     if on_preview is not None:
         if f_fa.done():
             fa_now, source_now = f_fa.result()
-        else:  # your edits and the local tier answer in milliseconds; the rest is still being asked
+        else:  # your edits, the cache and the local tier answer in milliseconds; the rest is still being asked
             fa_now = USER_MEMORY.get("overrides", {}).get(low) or USER_MEMORY.get("entries", {}).get(low, {}).get("fa", "")
             source_now = FA_SOURCE_EDIT if fa_now else ""
             if not fa_now:
-                fa_now, source_now = local_translation(clean, is_short=not is_idiom_or_phrase)
+                fa_now, source_now = quick_translation(typed, is_short=not is_idiom_or_phrase)
         preview = entry(fa_now, source_now, {tp["en"]: tp["fa"] for tp in merged.examples}, pending=PENDING_FA)
         preview["_preview"] = True
         on_preview(preview)
@@ -1713,19 +2033,19 @@ def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, mo
     sentences_to_tr: List[str] = []
     short_terms_to_tr: List[str] = []
     if not fa_main:
-        short_terms_to_tr.append(core_idiom_meaning_en or clean)
+        short_terms_to_tr.append(core_idiom_meaning_en or typed)
     for s in selected_senses:
         if s["example_en"] and not s.get("example_fa"):
             sentences_to_tr.append(s["example_en"])
     for item in colls_raw + syn_items + ant_items:
         short_terms_to_tr.append(item["term"])
-        if item["example_en"]:
+        if item["example_en"] and not item.get("example_fa"):
             sentences_to_tr.append(item["example_en"])
 
     trans_map = translate_batch_fast(sentences_to_tr, short_terms_to_tr)
 
     if not fa_main or fa_main in INVALID_FA_HEADERS:
-        fa_main = trans_map.get(core_idiom_meaning_en or clean, "")
+        fa_main = trans_map.get(core_idiom_meaning_en or typed, "")
         fa_source = ""  # whichever tier the batch used
     for s in selected_senses:
         if s["example_en"] and not s.get("example_fa"):

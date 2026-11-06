@@ -24,7 +24,7 @@ if .venv/bin/python -c "import llama_cpp" 2>/dev/null; then
 fi
 
 .venv/bin/pyinstaller --noconfirm --windowed --onedir --paths=. \
-    --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=nltk \
+    --hidden-import=lexical_engine --hidden-import=dictionary_sources \
     "${collect[@]}" --name Ocean app.py
 
 # Data files live next to the executable (ui.config.get_base_dir / lexical_engine._get_engine_base_dir look there).
@@ -36,7 +36,7 @@ done
 for f in kokoro-v1.0.int8.onnx kokoro-v1.0.onnx; do
     if [ -f "$f" ]; then cp -f "$f" dist/Ocean/; break; fi
 done
-for d in nltk_data offline_mt_model offline_slm_model fonts; do
+for d in offline_mt_model offline_slm_model fonts; do
     [ -d "$d" ] && cp -rf "$d" dist/Ocean/
 done
 
