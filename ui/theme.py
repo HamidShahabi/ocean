@@ -520,7 +520,7 @@ def apply_theme(settings_data: dict) -> str:
             background: {c['accent']};
             image: {check_url};
         }}
-        QLabel#HistoryTermLabel, QLabel#MarqueeText {{
+        QLabel#HistoryTermLabel {{
             color: {c['text_main']};
             font-weight: 500;
             background: transparent;
