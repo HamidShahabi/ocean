@@ -21,64 +21,30 @@ def enable_every_source():
         ds.REGISTRY.set_enabled(name, True)
 
 
-class SettingsStoreTest(unittest.TestCase):
+class RemovedSettingsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "settings.json")
-        self.addCleanup(enable_every_source)
 
-    def test_every_source_is_on_by_default(self):
+    def test_the_source_toggles_are_not_a_setting_any_more(self):
         s = SettingsManager(self.path)
-        self.assertEqual(s.data["disabled_sources"], [])
-        s.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), [])
+        self.assertNotIn("disabled_sources", s.data)
+        self.assertFalse(hasattr(s, "apply_sources"))
 
-    def test_defaults_are_not_shared_between_managers(self):
-        a = SettingsManager(self.path)
-        a.data["disabled_sources"].append("kaikki")
-        self.assertEqual(SettingsManager(self.path).data["disabled_sources"], [])
-        self.assertEqual(SettingsManager.DEFAULTS["disabled_sources"], [])
-
-    def test_choice_persists_and_is_applied_to_the_registry(self):
+    def test_an_old_settings_file_with_the_toggles_still_loads_and_drops_them(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"theme": "Light Mode", "disabled_sources": ["cambridge", "wordnet", 7], "reader_min_level": "C1"}, f)
         s = SettingsManager(self.path)
-        s.data["disabled_sources"] = ["urban_dictionary", "wordnet"]
+        self.assertEqual(s.data["theme"], "Light Mode")
+        self.assertNotIn("disabled_sources", s.data)
+        self.assertNotIn("reader_min_level", s.data)
         s.save()
-        reloaded = SettingsManager(self.path)
-        self.assertEqual(reloaded.data["disabled_sources"], ["urban_dictionary", "wordnet"])
-        reloaded.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["urban_dictionary", "wordnet"])
-        self.assertTrue(ds.REGISTRY.is_enabled("kaikki"))
-        # Switching one back on is applied too.
-        reloaded.data["disabled_sources"] = ["wordnet"]
-        reloaded.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["wordnet"])
+        with open(self.path, encoding="utf-8") as f:
+            self.assertNotIn("disabled_sources", json.load(f))
 
-    def test_unknown_and_malformed_entries_are_ignored(self):
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"disabled_sources": ["corpora", "no_such_source", 7, ["x"]]}, f)
-        s = SettingsManager(self.path)
-        s.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["corpora"])
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"disabled_sources": "kaikki"}, f)
-        self.assertEqual(SettingsManager(self.path).data["disabled_sources"], [])
-
-    def test_sources_removed_in_an_update_are_ignored(self):
-        # A settings file from a version with the online dictionaries (Cambridge, Longman...) still loads.
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"disabled_sources": ["cambridge", "longman", "datamuse", "wordnet"]}, f)
-        s = SettingsManager(self.path)
-        s.apply_sources()
-        self.assertEqual(ds.REGISTRY.disabled_names(), ["wordnet"])
-
-    def test_a_settings_file_from_before_the_toggles_keeps_everything_on(self):
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"theme": "Light Mode"}, f)
-        s = SettingsManager(self.path)
-        s.apply_sources()
-        self.assertEqual((s.data["theme"], ds.REGISTRY.disabled_names()), ("Light Mode", []))
-
-    def test_any_enabled(self):
+    def test_every_source_is_on_and_any_enabled(self):
+        self.addCleanup(enable_every_source)
+        self.assertEqual(ds.REGISTRY.disabled_names(), [])
         self.assertTrue(ds.REGISTRY.any_enabled())
         for name in ds.REGISTRY.names():
             ds.REGISTRY.set_enabled(name, False)

@@ -37,7 +37,6 @@ class FakeKokoro:
 def make_speaker(kokoro=None):
     with mock.patch.object(speaker_mod.NeuralSpeaker, "_load_kokoro"):  # no background load
         sp = speaker_mod.NeuralSpeaker(SettingsManager())
-    sp._loading = False
     sp._loaded.set()
     sp._kokoro = kokoro
     return sp
@@ -115,12 +114,13 @@ class KokoroPlaybackTest(unittest.TestCase):
         self.popen.assert_not_called()
         self.assertEqual(self.played, [])
 
-    def test_stop_silences_the_player(self):
+    def test_the_next_click_silences_the_player(self):
         player = mock.Mock()
         player.poll.return_value = None
         self.sp._player = player
         self.sp._token = 3
-        self.sp.stop()
+        with mock.patch.object(threading, "Thread"):
+            self.sp.speak("next")
         player.terminate.assert_called_once()
         self.assertGreater(self.sp._token, 3)
 
@@ -262,36 +262,6 @@ class FallbackVoiceTest(unittest.TestCase):
             self.sp._token = 1
             self.sp._speak("A long sentence to read.", 1)
         self.assertEqual(voice.Speak.call_args.args, ("", 1 | 2))  # async purge
-
-
-class VoiceAvailabilityTest(unittest.TestCase):
-    def check(self, kokoro=False, winsound=False, player=None, sapi=False, cli=None):
-        sp = make_speaker(FakeKokoro() if kokoro else None)
-        with mock.patch.object(speaker_mod, "HAS_WINSOUND", winsound), \
-                mock.patch.object(speaker_mod, "WAV_PLAYER_CMD", player), \
-                mock.patch.object(speaker_mod, "HAS_WIN32_SAPI", sapi), \
-                mock.patch.object(speaker_mod, "FALLBACK_TTS_BIN", cli):
-            return sp.has_voice()
-
-    def test_no_voice_without_kokoro_or_a_fallback(self):
-        self.assertFalse(self.check())
-        self.assertFalse(self.check(kokoro=True))  # Kokoro loaded but nothing to play the WAV with
-
-    def test_loaded_kokoro_with_a_player_is_a_voice(self):
-        self.assertTrue(self.check(kokoro=True, player=["paplay"]))
-        self.assertTrue(self.check(kokoro=True, winsound=True))
-
-    def test_system_voices_count(self):
-        self.assertTrue(self.check(sapi=True))
-        self.assertTrue(self.check(cli="/usr/bin/espeak-ng"))
-
-    def test_loading_flag_clears_and_announces_when_the_model_load_ends(self):
-        sp = make_speaker()
-        loaded = []
-        sp.voice_loaded.connect(lambda: loaded.append(sp.is_loading()))
-        sp._load_kokoro()
-        self.assertFalse(sp.is_loading())
-        self.assertEqual(loaded, [False])  # listeners see the final state
 
 
 if __name__ == "__main__":

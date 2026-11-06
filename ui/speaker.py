@@ -15,7 +15,7 @@ import wave
 from collections import OrderedDict, deque
 from typing import Any, Optional
 
-from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QObject
 
 import kokoro_files
 from ui.config import BASE_DIR, VOICE_OPTIONS, SettingsManager
@@ -69,12 +69,7 @@ SAPI_SPEAK_IS_XML = 8
 
 
 class NeuralSpeaker(QObject):
-    """Speaks text.
-
-    voice_loaded(): the background load of the Kokoro model has finished (successfully or not); re-check
-        has_voice().
-    """
-    voice_loaded = pyqtSignal()
+    """Speaks text."""
 
     def __init__(self, settings: SettingsManager) -> None:
         super().__init__()
@@ -101,7 +96,6 @@ class NeuralSpeaker(QObject):
             app.aboutToQuit.connect(self._on_quit)
         # Not a daemon: quitting while onnxruntime is mid-load (~1s after start) crashes the process,
         # so let interpreter shutdown wait for the load to finish.
-        self._loading = True
         self._loaded = threading.Event()
         threading.Thread(target=self._load_kokoro).start()
 
@@ -114,23 +108,7 @@ class NeuralSpeaker(QObject):
         try:
             self._init_kokoro()
         finally:
-            self._loading = False
             self._loaded.set()
-            try:
-                self.voice_loaded.emit()
-            except RuntimeError:  # the app quit while the model was loading
-                pass
-
-    def is_loading(self) -> bool:
-        """True while the Kokoro model is still loading in the background (it takes a moment after start)."""
-        return self._loading
-
-    def has_voice(self) -> bool:
-        """Whether speak() can make sound: Kokoro loaded with something to play it, or a fallback voice
-        (Windows SAPI, spd-say / espeak). False while Kokoro is still loading and there is no fallback; check
-        is_loading() and voice_loaded to tell "not yet" from "never"."""
-        kokoro_plays = self._kokoro is not None and (HAS_WINSOUND or WAV_PLAYER_CMD is not None)
-        return kokoro_plays or HAS_WIN32_SAPI or FALLBACK_TTS_BIN is not None
 
     def _find_model_files(self) -> tuple[str, str]:
         frozen = getattr(sys, "frozen", False)
@@ -168,9 +146,6 @@ class NeuralSpeaker(QObject):
             return
         token = self._cut()
         threading.Thread(target=self._speak, args=(clean, token), daemon=True).start()
-
-    def stop(self) -> None:
-        self._cut()
 
     def _cut(self) -> int:
         """Supersede the current clip and silence it. Returns the token of the next clip."""

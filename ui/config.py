@@ -27,7 +27,6 @@ def get_base_dir() -> str:
 BASE_DIR = get_base_dir()
 DB_FILE = lexical_engine.user_data_path("lexicon_vault.db")
 SETTINGS_FILE = lexical_engine.user_data_path("ocean_settings.json")
-READER_FILE = lexical_engine.user_data_path("reader_text.json")  # the Reader's last text and position
 
 VOICE_OPTIONS = [
     "am_michael (Male - US)",
@@ -45,9 +44,6 @@ SPEED_OPTIONS = [
 ]
 
 
-READER_LEVEL_OPTIONS = ["A1", "A2", "B1", "B2", "C1", "C2", "Off"]
-
-
 class SettingsManager:
     DEFAULTS = {
         "font_scale": "Medium (14px)",
@@ -57,12 +53,6 @@ class SettingsManager:
         "voice_id": "am_michael (Male - US)",
         "theme": "Dark Mode",
         "refresh_period": DEFAULT_REFRESH_PERIOD,
-        # Names (DictionarySource.name) of the dictionary sources switched off in Settings. Storing the
-        # off ones keeps every source, including any added later, on by default.
-        "disabled_sources": [],
-        "offline_only": False,
-        # Reader page: words of this CEFR level or higher are marked ("Off" = no level marking).
-        "reader_min_level": "B2",
     }
 
     def __init__(self, path: str = SETTINGS_FILE) -> None:
@@ -79,10 +69,10 @@ class SettingsManager:
                         self.data.update(loaded)
                 if self.data.get("voice_id") not in VOICE_OPTIONS:
                     self.data["voice_id"] = VOICE_OPTIONS[0]
-                off = self.data.get("disabled_sources")
-                self.data["disabled_sources"] = [n for n in off if isinstance(n, str)] if isinstance(off, list) else []
-                if self.data.get("reader_min_level") not in READER_LEVEL_OPTIONS:
-                    self.data["reader_min_level"] = self.DEFAULTS["reader_min_level"]
+                # Keys of removed settings (offline_only, disabled_sources, reader_min_level) are dropped,
+                # so they are not written back to the file.
+                for key in ("offline_only", "disabled_sources", "reader_min_level"):
+                    self.data.pop(key, None)
             except Exception:
                 log.exception("Could not read settings %s; using defaults", self.path)
 
@@ -92,12 +82,3 @@ class SettingsManager:
                 json.dump(self.data, f, indent=2)
         except Exception:
             log.exception("Could not save settings %s", self.path)
-
-    def apply_sources(self, registry: Any = None) -> None:
-        """Switch the registry's dictionary sources on or off to match the saved choice (names the registry
-        no longer knows are ignored, sources the settings never heard of stay on)."""
-        if registry is None:
-            from dictionary_sources import REGISTRY as registry
-        off = set(self.data.get("disabled_sources", []))
-        for name in registry.names():
-            registry.set_enabled(name, name not in off)

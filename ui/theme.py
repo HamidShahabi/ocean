@@ -40,10 +40,6 @@ THEME_COLORS = {
     "accent": "#64B5F6",
     "accent_bg": "#2B5278",
     "accent_fg": "#FFFFFF",
-    # Reader page marks (a saved word / a word above your level): backgrounds that keep the normal text
-    # colour readable (contrast >= 4.5 in both themes, checked in tests/test_reader.py).
-    "mark_saved_bg": "#1F5A8C",
-    "mark_above_bg": "#7A5A12",
 }
 
 
@@ -218,8 +214,6 @@ def apply_theme(settings_data: dict) -> str:
             "accent": "#58A6FF",
             "accent_bg": "#1F3A5F",
             "accent_fg": "#FFFFFF",
-            "mark_saved_bg": "#1F5A8C",
-            "mark_above_bg": "#7A5A12",
         })
         btn_primary_bg = "#58A6FF"
         btn_primary_fg = "#0D1117"
@@ -240,8 +234,6 @@ def apply_theme(settings_data: dict) -> str:
             "accent": "#0969DA",
             "accent_bg": "#DDF4FF",
             "accent_fg": "#0550AE",
-            "mark_saved_bg": "#B6E3FF",
-            "mark_above_bg": "#FFE08A",
         })
         btn_primary_bg = "#0969DA"
         btn_primary_fg = "#FFFFFF"
@@ -378,15 +370,6 @@ def apply_theme(settings_data: dict) -> str:
             border-color: {c['accent']};
             background: {c['accent']};
         }}
-        QLabel#OfflineBadge {{
-            color: {c['accent']};
-            font-size: {max(11, px - 1)}px;
-            font-weight: 600;
-            background: transparent;
-            border: 1px solid {c['accent']};
-            border-radius: 12px;
-            padding: 6px 12px;
-        }}
         QLabel#HistoryTermLabel {{
             color: {c['text_main']};
             font-size: {px}px;
@@ -411,22 +394,6 @@ def apply_theme(settings_data: dict) -> str:
         }}
         QLineEdit#DrawerInput:focus {{
             border: 1.5px solid {c['accent']};
-        }}
-        QTextEdit#ReaderView, QPlainTextEdit#ReaderInput {{
-            background-color: {c['bg_card']};
-            color: {c['text_main']};
-            border: 1px solid {c['border']};
-            border-radius: 14px;
-            padding: 12px 16px;
-            font-size: {px + 2}px;
-            selection-background-color: {c['accent']};
-            selection-color: {c['accent_fg']};
-        }}
-        QPlainTextEdit#ReaderInput:focus {{
-            border: 1.5px solid {c['accent']};
-        }}
-        QSplitter::handle {{
-            background: transparent;
         }}
         QPushButton#PrimaryPillButton {{
             background-color: {btn_primary_bg};
@@ -453,24 +420,6 @@ def apply_theme(settings_data: dict) -> str:
             border: 1px solid {c['accent']};
             background-color: {c['accent_bg']};
             color: {c['accent_fg']};
-        }}
-        QPushButton#QuizCorrectButton {{
-            background-color: rgba(46, 160, 67, 0.28);
-            color: {c['text_main']};
-            border: 1.5px solid #2EA043;
-            border-radius: 17px;
-            padding: 0px 16px;
-            font-size: {max(12, px - 1)}px;
-            font-weight: 700;
-        }}
-        QPushButton#QuizWrongButton {{
-            background-color: rgba(248, 81, 73, 0.24);
-            color: {c['text_main']};
-            border: 1.5px solid #F85149;
-            border-radius: 17px;
-            padding: 0px 16px;
-            font-size: {max(12, px - 1)}px;
-            font-weight: 700;
         }}
         QPushButton#ClickableWordPill {{
             background-color: {c['bg_card']};

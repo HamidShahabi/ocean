@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 import sys
@@ -93,14 +94,14 @@ class OfflineSwitchTest(unittest.TestCase):
                 le.smart_request("GET", "https://example.com/")
         self.assertIn("requests.Session.request", net.attempts)  # the tripwire does trip when the switch is off
 
-    def test_setting_defaults_to_off_and_persists(self):
-        self.assertFalse(SettingsManager.DEFAULTS["offline_only"])
+    def test_the_setting_is_gone_and_an_old_settings_file_still_loads(self):
+        self.assertNotIn("offline_only", SettingsManager.DEFAULTS)
         path = os.path.join(tempfile.mkdtemp(), "settings.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"offline_only": True, "theme": "Light Mode"}, f)
         s = SettingsManager(path)
-        self.assertFalse(s.data["offline_only"])
-        s.data["offline_only"] = True
-        s.save()
-        self.assertTrue(SettingsManager(path).data["offline_only"])
+        self.assertEqual(s.data["theme"], "Light Mode")
+        self.assertNotIn("offline_only", s.data)
 
 
 class NoNetworkInOfflineModeTest(unittest.TestCase):

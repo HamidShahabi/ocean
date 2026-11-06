@@ -12,7 +12,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lexicon_fixture import use_lexicon  # noqa: E402
 import lexical_engine as le  # noqa: E402
-from anki_export import note_fields  # noqa: E402
 
 FLEETING = "زودگذر"            # زودگذر
 BANK = "بانک"  # the fixture dictionary translates "bank" so
@@ -97,14 +96,6 @@ class AnalyzePersianTest(unittest.TestCase):
         with mock.patch.object(le, "analyze_persian", return_value={"is_reverse": True}) as rev:
             self.assertEqual(le.analyze_with_dictionaries(f" {FLEETING} "), {"is_reverse": True})
             rev.assert_called_once_with(FLEETING)
-
-    def test_anki_note_for_reverse_entry(self):
-        d, _ = self._run(FLEETING, gtx=("fleeting", [{"term": "transient", "pos": "adjective"}]))
-        front, back, tags = note_fields(d)
-        self.assertEqual(front, FLEETING)
-        self.assertIn("<b>fleeting</b>", back)
-        self.assertIn("transient", back)
-        self.assertEqual(tags, "ocean ocean::persian")
 
 
 if __name__ == "__main__":

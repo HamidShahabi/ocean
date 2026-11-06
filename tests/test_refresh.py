@@ -11,7 +11,6 @@ os.environ["XDG_DATA_HOME"] = _DATA
 os.environ["APPDATA"] = _DATA
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lexical_engine  # noqa: E402
-import review  # noqa: E402
 import storage  # noqa: E402
 
 NOW = datetime(2026, 6, 1, 12, 0, 0)
@@ -115,16 +114,6 @@ class StoredProvenanceTest(unittest.TestCase):
         self.assertEqual(got["_engine_version"], V)
         self.assertFalse(self.store.is_entry_stale(got, 90))
         self.assertTrue(got["_is_favorite"])
-
-    def test_review_progress_survives_a_refresh(self):
-        self.store.save_entry("sea", {"headword": "sea"})
-        self.store.toggle_favorite("sea")
-        reviews = review.ReviewStore(self.db_path)
-        state = review.CardState(reps=3, interval_days=6.0, ease=2.4, lapses=1, due=datetime.now() + timedelta(days=6))
-        reviews.save_state("sea", state, datetime.now())
-        self.store.save_entry("sea", {"headword": "sea", "v": 2})  # refresh
-        self.assertEqual(reviews.due_cards(datetime.now() + timedelta(days=30))[0].state.reps, 3)
-        self.assertEqual(reviews.due_count(datetime.now()), 0)  # still scheduled, not reset to new
 
     def test_legacy_database_is_migrated_and_its_entries_count_as_old(self):
         legacy = os.path.join(self._dir.name, "legacy.db")

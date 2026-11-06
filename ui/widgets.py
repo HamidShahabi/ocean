@@ -92,7 +92,7 @@ class SmoothGlassEditDialog(QDialog):
         lay.setContentsMargins(24, 22, 24, 22)
         lay.setSpacing(14)
 
-        title = QLabel("Teach Ocean \u2014 Edit Persian Translation")
+        title = QLabel("Edit Persian Translation")
         title.setObjectName("CardTitle")
         lay.addWidget(title)
 
