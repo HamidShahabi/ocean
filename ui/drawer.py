@@ -1,22 +1,22 @@
-"""The attached right-hand drawer: a menu plus the history and settings pages."""
-from typing import TYPE_CHECKING
-
-from typing import Optional
+"""The attached right-hand drawer: a menu plus the history, reports, sources and settings pages."""
+from typing import Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import QPoint, QRect, Qt, QSize
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ui.history_page import HistoryPage
+from ui.reports_page import ReportsPage
 from ui.settings_page import SettingsPage
 from ui.motion import DRAWER_FADE_MS, Crossfade, FadeStackedWidget
+from ui.sources_page import SourcesPage
 from ui.theme import VectorIcons
 from ui.widgets import SmoothGlassFrame
 
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
 
-PAGE_MENU, PAGE_HISTORY, PAGE_SETTINGS = 0, 1, 2
+PAGE_MENU, PAGE_HISTORY, PAGE_SETTINGS, PAGE_REPORTS, PAGE_SOURCES = 0, 1, 2, 3, 4
 
 
 class AttachedRightDrawer(SmoothGlassFrame):
@@ -91,21 +91,16 @@ class AttachedRightDrawer(SmoothGlassFrame):
         m_lay.setContentsMargins(0, 8, 0, 0)
         m_lay.setSpacing(10)
 
-        btn_hist = QPushButton("History")
-        btn_hist.setObjectName("DrawerMenuItem")
-        btn_hist.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_hist.setFixedHeight(46)
-        btn_hist.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_hist.clicked.connect(lambda: self.show_page(PAGE_HISTORY))
-        m_lay.addWidget(btn_hist)
-
-        btn_set = QPushButton("Settings")
-        btn_set.setObjectName("DrawerMenuItem")
-        btn_set.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_set.setFixedHeight(46)
-        btn_set.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_set.clicked.connect(lambda: self.show_page(PAGE_SETTINGS))
-        m_lay.addWidget(btn_set)
+        # Menu order differs from the page indexes above.
+        for text, page in (("History", PAGE_HISTORY), ("Reports", PAGE_REPORTS), ("Sources", PAGE_SOURCES),
+                           ("Settings", PAGE_SETTINGS)):
+            btn = QPushButton(text)
+            btn.setObjectName("DrawerMenuItem")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setFixedHeight(46)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.clicked.connect(lambda _, i=page: self.show_page(i))
+            m_lay.addWidget(btn)
 
         m_lay.addStretch()
         self.stack.addWidget(page_menu)
@@ -113,13 +108,17 @@ class AttachedRightDrawer(SmoothGlassFrame):
         # Page order must match the PAGE_* indexes above.
         self.history_page = HistoryPage(self.main_win)
         self.settings_page = SettingsPage(self.main_win, self)
-        self.pages = {PAGE_HISTORY: self.history_page, PAGE_SETTINGS: self.settings_page}
+        self.reports_page = ReportsPage(self.main_win)
+        self.sources_page = SourcesPage(self.main_win)
+        self.pages = {PAGE_HISTORY: self.history_page, PAGE_SETTINGS: self.settings_page,
+                      PAGE_REPORTS: self.reports_page, PAGE_SOURCES: self.sources_page}
         for index in sorted(self.pages):
             self.stack.addWidget(self.pages[index])
 
     def show_page(self, index: int) -> None:
         self.stack.begin_fade()
-        titles = {PAGE_MENU: "Ocean Menu", PAGE_HISTORY: "History", PAGE_SETTINGS: "Settings"}
+        titles = {PAGE_MENU: "Ocean Menu", PAGE_HISTORY: "History", PAGE_SETTINGS: "Settings",
+                  PAGE_REPORTS: "Reports", PAGE_SOURCES: "Sources"}
         self.drawer_title.setText(titles.get(index, "Ocean Menu"))
         self.back_menu_btn.setVisible(index != PAGE_MENU)
         page = self.pages.get(index)

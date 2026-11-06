@@ -9,7 +9,7 @@ os.environ["XDG_DATA_HOME"] = tempfile.mkdtemp()
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from PyQt6.QtCore import QModelIndex, Qt  # noqa: E402
+from PyQt6.QtCore import QModelIndex  # noqa: E402
 from PyQt6.QtGui import QColor, QFontDatabase, QFontMetrics  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QListWidget, QListWidgetItem  # noqa: E402
@@ -250,10 +250,8 @@ class MotionTest(unittest.TestCase):
 
     def test_page_switch_fades_between_home_and_results(self):
         motion.set_motion_override(True)
-        self.win.db.save_entry("serendipity", {"headword": "serendipity", "persian_equivalent": "x",
-                                               "senses": [{"pos": "Noun", "def": "d"}]})
         stack = self.win.stack
-        self.win._analyze_input(override_term="serendipity")
+        self.win._switch_to_results_view()
         self.assertIs(stack.currentWidget(), self.win.results_page)
         self.assertTrue(stack._fade.running)
         QTest.qWait(motion.PAGE_FADE_MS + 250)
@@ -262,7 +260,6 @@ class MotionTest(unittest.TestCase):
         self.assertIs(stack.currentWidget(), self.win.home_page)
         QTest.qWait(motion.PAGE_FADE_MS + 250)
         self.assertFalse(stack._fade.running)
-        self.win.db.delete_entry("serendipity")
 
     def test_reduced_motion_environment_variable(self):
         os.environ["OCEAN_REDUCE_MOTION"] = "1"

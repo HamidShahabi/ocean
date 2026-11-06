@@ -607,25 +607,64 @@ def apply_theme(settings_data: dict) -> str:
             color: {c['accent_fg']};
             border: 1px solid {c['accent']};
         }}
-        QPushButton#HistoryStarButton {{
+        QPushButton#ReportBangButton {{
+            background-color: {c['bg_inner']};
+            color: {c['text_muted']};
+            border: 1px solid {c['border']};
+            border-radius: 17px;
+            padding: 0px;
+            font-size: {px + 1}px;
+            font-weight: 700;
+        }}
+        QPushButton#ReportBangButton:hover {{
+            border: 1px solid {c['accent']};
+            color: {c['accent_fg']};
+            background-color: {c['accent_bg']};
+        }}
+        QPushButton#ReportBangButton[reported="true"] {{
+            background-color: {c['accent']};
+            color: {c['on_primary']};
+            border: 1px solid {c['accent']};
+        }}
+        QPushButton#RowDeleteButton {{
             background: transparent;
             color: {c['text_muted']};
             border: none;
-            border-radius: 12px;
+            border-radius: 14px;
             padding: 0px;
-            font-size: {px + 1}px;
+            font-size: {px}px;
         }}
-        QPushButton#HistoryStarButton:hover {{
+        QPushButton#RowDeleteButton:hover {{
+            color: {c['accent_fg']};
+            background-color: {c['accent_bg']};
+        }}
+        QLabel#SubsectionTitle {{
+            font-size: {px}px;
+            font-weight: 600;
             color: {c['accent']};
-            background-color: {card_hover};
-        }}
-        QPushButton#HistoryStarButtonActive {{
             background: transparent;
-            color: {c['accent']};
             border: none;
-            border-radius: 12px;
-            padding: 0px;
+        }}
+        QLabel#RowLabel {{
+            color: {c['text_muted']};
+            font-size: {max(11, px - 1)}px;
+            font-weight: 500;
+            background: transparent;
+            border: none;
+        }}
+        QLabel#SourcePriority {{
+            background-color: {c['accent_bg']};
+            color: {c['accent_fg']};
+            border-radius: 13px;
+            font-size: {max(11, px - 1)}px;
+            font-weight: 600;
+        }}
+        QLabel#SourceName {{
+            color: {c['text_main']};
             font-size: {px + 1}px;
+            font-weight: 600;
+            background: transparent;
+            border: none;
         }}
         QPushButton#DropdownPill {{
             background-color: {c['bg_inner']};

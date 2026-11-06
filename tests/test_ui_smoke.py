@@ -11,13 +11,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from PyQt6.QtCore import QCoreApplication, QEvent, QObject, Qt, pyqtSignal  # noqa: E402
+from PyQt6.QtCore import QObject, Qt, pyqtSignal  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton  # noqa: E402
 
 import lexical_engine  # noqa: E402
 from ui import theme  # noqa: E402
-from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_SETTINGS  # noqa: E402
+from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_REPORTS, PAGE_SETTINGS, PAGE_SOURCES  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 
 WORD = {
@@ -66,9 +66,10 @@ class FakeWorker(QObject):
     finished_success = pyqtSignal(str, dict)
     finished_error = pyqtSignal(str)
 
-    def __init__(self, term):
+    def __init__(self, term, refresh=False):
         super().__init__()
         self.term = term
+        self.refresh = refresh
 
 
 def card_texts(win):
@@ -147,7 +148,8 @@ class UiSmokeTest(unittest.TestCase):
         drawer = self.win.right_drawer
         self.win._toggle_right_drawer()
         self.assertTrue(drawer.isVisible())
-        for index, title in ((PAGE_HISTORY, "History"), (PAGE_SETTINGS, "Settings"), (PAGE_MENU, "Ocean Menu")):
+        for index, title in ((PAGE_HISTORY, "History"), (PAGE_SETTINGS, "Settings"), (PAGE_REPORTS, "Reports"),
+                             (PAGE_SOURCES, "Sources"), (PAGE_MENU, "Ocean Menu")):
             drawer.show_page(index)
             self.assertEqual(drawer.stack.currentIndex(), index)
             self.assertEqual(drawer.drawer_title.text(), title)
@@ -193,7 +195,7 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(shown(), everything)
         # The Saved filter combines with search.
         self.win.db.toggle_favorite("serendipity")
-        page.filter_drop._on_picked("Saved Favorites Only")
+        page.filter_drop._on_picked("Favorites Only")
         self.assertEqual(shown(), ["serendipity"])
         page.search_box.setText("ice")
         page.populate()
@@ -230,7 +232,7 @@ class UiSmokeTest(unittest.TestCase):
     def test_menu_and_home_offer_only_the_remaining_features(self):
         self.win.right_drawer.show_page(PAGE_MENU)
         menu = {b.text() for b in self.win.right_drawer.stack.widget(PAGE_MENU).findChildren(QPushButton)}
-        self.assertEqual(menu, {"History", "Settings"})
+        self.assertEqual(menu, {"History", "Reports", "Sources", "Settings"})
         home = {b.text() for b in self.win.home_page.findChildren(QPushButton)}
         for removed in ("Quiz", "Reader", "Review"):
             self.assertNotIn(removed, home)
@@ -287,7 +289,8 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(texts.count("noun: an unknown force"), 1)  # one heading per sense
         self.assertEqual(texts.count("noun: an unplanned event"), 1)
         self.assertLess(texts.index("noun: an unknown force"), texts.index("noun: an unplanned event"))
-        self.assertIn("<b>Derived terms:</b>", texts)
+        self.assertIn("Common Expressions", texts)
+        self.assertNotIn("Derived terms", " ".join(texts))
         links = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
         self.assertIn("serendipitously", links)
 
@@ -296,93 +299,19 @@ class UiSmokeTest(unittest.TestCase):
         buttons = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
         self.assertIn("Reveal Persian Translation", buttons)
 
-    def _example_button_and_label(self):
-        """The audio button and sentence label of the first sense's example."""
+    def test_example_audio_button_speaks_the_sentence_and_leaves_the_text_alone(self):
         example = WORD["senses"][0]["example_en"]
-        self.win.results_page.render("serendipity", WORD)
+        speaker = self.win.speaker
+        with mock.patch.object(speaker, "prefetch") as prefetch:
+            self.win.results_page.render("serendipity", WORD)
+        prefetch.assert_any_call(example)  # synthesized ahead, so the click plays at once
         label = next(l for l in self.win.results_page.findChildren(QLabel) if "that we met" in l.text())
         button = next(b for b in label.parentWidget().findChildren(QPushButton) if b.toolTip() == f"Listen: {example}")
-        return button, label
-
-    def test_playing_an_example_highlights_each_word_and_stopping_clears_it(self):
-        button, label = self._example_button_and_label()
         original = label.text()
-        speaker = self.win.speaker
-        highlighter = self.win.results_page.example_highlighter
-        now = [0.0]
-        highlighter._clock = lambda: now[0]
-        with mock.patch.object(speaker, "speak", return_value=7) as speak:
+        with mock.patch.object(speaker, "speak") as speak:
             button.click()
-        speak.assert_called_once_with(WORD["senses"][0]["example_en"])
-
-        speaker.clip_started.emit(7, 0.5, 3.0)  # speech starts 0.5 s in, lasts 3 s
-        self.app.processEvents()
-        self.assertNotIn("<span", label.text())  # lead-in silence: nothing highlighted yet
-
-        seen = []
-        for t in (0.6, 1.0, 2.2, 3.4):
-            now[0] = t
-            highlighter._tick()
-            self.assertIn("<span", label.text())
-            seen.append(label.text().split("<span")[1].split(">")[1].split("<")[0])
-        self.assertEqual(seen[0], "It")
-        self.assertEqual(seen[-1], "met")
-        self.assertEqual(len(set(seen)), len(seen))  # the highlight moved along
-
-        speaker.playback_stopped.emit(7)
-        self.app.processEvents()
-        self.assertEqual(label.text(), original)
-        self.assertFalse(highlighter._timer.isActive())
-
-    def test_starting_another_clip_clears_the_highlight(self):
-        button, label = self._example_button_and_label()
-        original = label.text()
-        speaker = self.win.speaker
-        with mock.patch.object(speaker, "speak", return_value=1):
-            button.click()
-        speaker.clip_started.emit(1, 0.0, 3.0)
-        self.app.processEvents()
-        self.assertNotEqual(label.text(), original)
-        speaker.clip_started.emit(2, 0.0, 1.0)  # some other clip (e.g. a headword button) starts
-        self.app.processEvents()
-        self.assertEqual(label.text(), original)
-        # A late "stopped" for the first clip must not disturb anything.
-        speaker.playback_stopped.emit(1)
-        self.assertEqual(label.text(), original)
-
-    def test_stopping_the_speaker_clears_the_highlight(self):
-        button, label = self._example_button_and_label()
-        original = label.text()
-        with mock.patch.object(self.win.speaker, "speak", return_value=1):
-            button.click()
-        self.win.speaker.clip_started.emit(1, 0.0, 3.0)
-        self.app.processEvents()
-        self.assertNotEqual(label.text(), original)
-        self.win.speaker._token = 1
-        self.win.speaker.stop()
-        self.assertEqual(label.text(), original)
-
-    def test_fallback_voice_plays_without_highlighting(self):
-        button, label = self._example_button_and_label()
-        original = label.text()
-        speaker = self.win.speaker
-        with mock.patch.object(speaker, "speak", return_value=4):
-            button.click()
-        speaker.clip_started.emit(4, 0.0, 0.0)  # SAPI / CLI voices report no duration
-        self.app.processEvents()
-        self.assertEqual(label.text(), original)
-        self.assertFalse(self.win.results_page.example_highlighter._timer.isActive())
-
-    def test_rerender_while_playing_does_not_crash(self):
-        button, label = self._example_button_and_label()
-        with mock.patch.object(self.win.speaker, "speak", return_value=1):
-            button.click()
-        self.win.speaker.clip_started.emit(1, 0.0, 3.0)
-        self.app.processEvents()
-        self.win.results_page.render("serendipity", WORD)  # the old label is deleted
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        self.win.results_page.example_highlighter._tick()
-        self.assertFalse(self.win.results_page.example_highlighter._timer.isActive())
+        speak.assert_called_once_with(example)
+        self.assertEqual(label.text(), original)  # no word highlighting
 
     def _make_stale(self, term="serendipity"):
         with self.win.db._conn() as conn:

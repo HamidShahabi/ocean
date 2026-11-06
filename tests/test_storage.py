@@ -345,5 +345,67 @@ class ConnectionHandlingTest(unittest.TestCase):
         self.assertEqual(store.list_entries(), [])
 
 
+class BulkDeleteAndReportsTest(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.db_path = os.path.join(self._dir.name, "lexicon_vault.db")
+        self.store = storage.HistoryStore(self.db_path)
+        self.reports = storage.ReportStore(self.db_path)
+
+    def test_delete_entries_removes_history_and_favourite_flag_together(self):
+        for term in ("one", "two", "three"):
+            self.store.save_entry(term, {"headword": term, "senses": [{"def": "x"}]})
+        self.store.toggle_favorite("two")
+        self.assertEqual(self.store.delete_entries(["One", "two", "missing", "two"]), 2)
+        self.assertEqual([e["query_key"] for e in self.store.list_entries()], ["three"])
+        self.assertEqual(self.store.list_entries(favorites_only=True), [])
+        self.assertEqual(self.store.delete_entries([]), 0)
+        self.assertEqual(self.store.delete_entries([f"k{i}" for i in range(1200)]), 0)  # many keys at once
+
+    def test_reports_table_stores_the_entry_as_shown_with_versions_note_and_snapshot(self):
+        payload = {"headword": "bank", "senses": [{"def": "A place for money.", "example_fa": FLEETING}], "_is_favorite": True}
+        rid = self.reports.add(" bank ", payload, note="  the   example is wrong ", snapshot=b"\x89PNGdata", app_version="abc123")
+        got = self.reports.get(rid)
+        self.assertEqual((got["term"], got["kind"], got["note"], got["app_version"]), ("bank", "word", "the example is wrong", "abc123"))
+        self.assertEqual(got["engine_version"], storage.lexical_engine.ENGINE_VERSION)
+        self.assertEqual(got["payload"], payload)  # Persian and "_" keys survive as shown
+        self.assertEqual(got["snapshot"], b"\x89PNGdata")
+        self.assertRegex(got["created_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$")
+        self.assertNotIn("payload", self.reports.list()[0])  # the list stays light
+
+    def test_report_kinds(self):
+        self.assertEqual(storage.report_kind({"is_reverse": True}), "persian")
+        self.assertEqual(storage.report_kind({"is_sentence": True, "is_idiom": True}), "sentence")
+        self.assertEqual(storage.report_kind({"is_idiom": True}), "idiom")
+        self.assertEqual(storage.report_kind({}), "word")
+
+    def test_list_order_latest_for_note_and_delete(self):
+        a = self.reports.add("Alpha", {"headword": "Alpha"})
+        b = self.reports.add("beta", {"headword": "beta"})
+        c = self.reports.add("alpha", {"headword": "Alpha"}, note="again")
+        self.assertEqual([r["id"] for r in self.reports.list()], [c, b, a])
+        self.assertEqual([r["id"] for r in self.reports.all_full()], [a, b, c])  # the export is oldest first
+        self.assertEqual(self.reports.latest_for("ALPHA")["id"], c)
+        self.assertIsNone(self.reports.latest_for("gamma"))
+        self.reports.set_note(a, "x" * 400)
+        self.assertEqual(len(self.reports.get(a)["note"]), 300)
+        self.reports.delete(c)
+        self.assertEqual(self.reports.latest_for("alpha")["id"], a)
+        self.assertEqual(self.reports.count(), 2)
+        self.assertIsNone(self.reports.get(c))
+
+    def test_reports_live_beside_the_history_and_never_touch_it(self):
+        self.store.save_entry("bank", {"headword": "bank", "senses": [{"def": "x"}]})
+        self.reports.add("bank", {"headword": "bank"})
+        conn = sqlite3.connect(self.db_path)
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        conn.close()
+        self.assertIn("reports", tables)
+        self.assertIn("lexicon", tables)
+        self.assertEqual(len(self.store.list_entries()), 1)
+        self.assertEqual(storage.ReportStore(self.db_path).count(), 1)  # opening again is idempotent and keeps the rows
+
+
 if __name__ == "__main__":
     unittest.main()
