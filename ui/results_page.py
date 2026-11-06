@@ -18,7 +18,6 @@ from PyQt6.QtWidgets import (
 
 import lexical_engine
 from ui.flow_layout import FlowLayout
-from ui.highlight import ExampleHighlighter
 from ui.reports_page import ReportPopover
 from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS
 from ui.widgets import PersianTranslationWidget, SmoothGlassFrame, create_audio_button
@@ -60,7 +59,6 @@ class ResultsPage(QWidget):
     def __init__(self, main_win: "MainWindow") -> None:
         super().__init__()
         self.main_win = main_win
-        self.example_highlighter = ExampleHighlighter(main_win.speaker)
         self.setObjectName('ResultsPage')
         res_vbox = QVBoxLayout(self)
         res_vbox.setContentsMargins(0, 0, 0, 0)
@@ -90,6 +88,7 @@ class ResultsPage(QWidget):
         self._popover: Optional[ReportPopover] = None
 
     def _clear_cards(self) -> None:
+        self.main_win.speaker.reset_prefetch()  # the audio buttons of the new page queue their own clips
         while self.cards_layout.count():
             item = self.cards_layout.takeAt(0)
             w = item.widget()
@@ -205,10 +204,7 @@ class ResultsPage(QWidget):
 
             ex_row = QHBoxLayout()
             ex_row.setSpacing(10)
-            # Reading the example aloud highlights each word in ex_lbl as it is spoken.
-            ex_row.addWidget(create_audio_button(
-                ex_en, self.main_win.speaker, self.main_win.settings,
-                on_click=lambda lbl=ex_lbl, t=ex_en: self.example_highlighter.speak(lbl, t)))
+            ex_row.addWidget(self._create_audio_button(ex_en))
 
             ex_col = QVBoxLayout()
             ex_col.setSpacing(3)
@@ -623,9 +619,7 @@ class ResultsPage(QWidget):
 
                 ex_row = QHBoxLayout()
                 ex_row.setSpacing(10)
-                ex_row.addWidget(create_audio_button(
-                    ex_en, self.main_win.speaker, self.main_win.settings,
-                    on_click=lambda lbl=en_sent_lbl, t=ex_en: self.example_highlighter.speak(lbl, t)))
+                ex_row.addWidget(self._create_audio_button(ex_en))
 
                 ex_col = QVBoxLayout()
                 ex_col.setSpacing(3)
