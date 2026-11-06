@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton  # noqa
 
 import lexical_engine  # noqa: E402
 from ui import theme  # noqa: E402
-from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_SETTINGS  # noqa: E402
+from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_REPORTS, PAGE_SETTINGS, PAGE_SOURCES  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 
 WORD = {
@@ -66,9 +66,10 @@ class FakeWorker(QObject):
     finished_success = pyqtSignal(str, dict)
     finished_error = pyqtSignal(str)
 
-    def __init__(self, term):
+    def __init__(self, term, refresh=False):
         super().__init__()
         self.term = term
+        self.refresh = refresh
 
 
 def card_texts(win):
@@ -147,7 +148,8 @@ class UiSmokeTest(unittest.TestCase):
         drawer = self.win.right_drawer
         self.win._toggle_right_drawer()
         self.assertTrue(drawer.isVisible())
-        for index, title in ((PAGE_HISTORY, "History"), (PAGE_SETTINGS, "Settings"), (PAGE_MENU, "Ocean Menu")):
+        for index, title in ((PAGE_HISTORY, "History"), (PAGE_SETTINGS, "Settings"), (PAGE_REPORTS, "Reports"),
+                             (PAGE_SOURCES, "Sources"), (PAGE_MENU, "Ocean Menu")):
             drawer.show_page(index)
             self.assertEqual(drawer.stack.currentIndex(), index)
             self.assertEqual(drawer.drawer_title.text(), title)
@@ -193,7 +195,7 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(shown(), everything)
         # The Saved filter combines with search.
         self.win.db.toggle_favorite("serendipity")
-        page.filter_drop._on_picked("Saved Favorites Only")
+        page.filter_drop._on_picked("Favorites Only")
         self.assertEqual(shown(), ["serendipity"])
         page.search_box.setText("ice")
         page.populate()
@@ -230,7 +232,7 @@ class UiSmokeTest(unittest.TestCase):
     def test_menu_and_home_offer_only_the_remaining_features(self):
         self.win.right_drawer.show_page(PAGE_MENU)
         menu = {b.text() for b in self.win.right_drawer.stack.widget(PAGE_MENU).findChildren(QPushButton)}
-        self.assertEqual(menu, {"History", "Settings"})
+        self.assertEqual(menu, {"History", "Reports", "Sources", "Settings"})
         home = {b.text() for b in self.win.home_page.findChildren(QPushButton)}
         for removed in ("Quiz", "Reader", "Review"):
             self.assertNotIn(removed, home)
@@ -287,7 +289,8 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(texts.count("noun: an unknown force"), 1)  # one heading per sense
         self.assertEqual(texts.count("noun: an unplanned event"), 1)
         self.assertLess(texts.index("noun: an unknown force"), texts.index("noun: an unplanned event"))
-        self.assertIn("<b>Derived terms:</b>", texts)
+        self.assertIn("Common Expressions", texts)
+        self.assertNotIn("Derived terms", " ".join(texts))
         links = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
         self.assertIn("serendipitously", links)
 

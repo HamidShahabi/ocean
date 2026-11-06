@@ -200,6 +200,17 @@ class HistoryStore:
         with self._conn() as conn:
             conn.execute("DELETE FROM lexicon WHERE query_key = ?", (key,))
 
+    def delete_entries(self, terms: List[str]) -> int:
+        """Delete several entries (history and favourite flag go together) in one transaction; returns how many existed."""
+        keys = list({t.strip().lower() for t in terms})
+        deleted = 0
+        with self._conn() as conn:
+            for i in range(0, len(keys), 500):  # stay below SQLite's variable limit
+                chunk = keys[i:i + 500]
+                deleted += conn.execute(
+                    f"DELETE FROM lexicon WHERE query_key IN ({','.join('?' * len(chunk))})", chunk).rowcount
+        return deleted
+
     def english_entries_with_persian(self, fa: str, limit: int = 8) -> List[str]:
         """English entries in your history whose Persian meaning (any comma-separated part) matches `fa`."""
         target = lexical_engine.fa_key(fa)
@@ -254,3 +265,118 @@ class HistoryStore:
         except (ValueError, AttributeError):
             return False
         return isinstance(persian, str) and needle in lexical_engine.fa_key(persian).lower()
+
+
+def report_kind(payload: Dict[str, Any]) -> str:
+    """What a reported entry is: "persian" (Persian input), "sentence", "idiom" (phrase) or "word"."""
+    if payload.get("is_reverse"):
+        return "persian"
+    if payload.get("is_sentence"):
+        return "sentence"
+    if payload.get("is_idiom"):
+        return "idiom"
+    return "word"
+
+
+class ReportStore:
+    """Issue reports (the "!" button): the entry as shown, a snapshot of the page and an optional note.
+    They live in the user's database (the `reports` table) until the user deletes them."""
+
+    LIST_COLUMNS = "id, term, kind, created_at, note, engine_version, app_version"
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        with self._conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    term TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    app_version TEXT NOT NULL DEFAULT '',
+                    engine_version INTEGER,
+                    note TEXT NOT NULL DEFAULT '',
+                    snapshot BLOB
+                )
+                """
+            )
+
+    @contextmanager
+    def _conn(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    def add(self, term: str, payload: Dict[str, Any], note: str = "", snapshot: Optional[bytes] = None,
+            app_version: str = "") -> int:
+        """Record a report and return its id. The payload is stored as shown (including the `_` keys the UI adds)."""
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO reports (term, kind, created_at, payload, app_version, engine_version, note, snapshot) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (term.strip(), report_kind(payload), now, json.dumps(payload, ensure_ascii=False, default=str),
+                 app_version, lexical_engine.ENGINE_VERSION, self.clean_note(note),
+                 sqlite3.Binary(snapshot) if snapshot else None),
+            )
+            return int(cur.lastrowid)
+
+    def list(self) -> List[Dict[str, Any]]:
+        """Newest first, without the payloads and snapshots (use get())."""
+        with self._conn() as conn:
+            rows = conn.execute(f"SELECT {self.LIST_COLUMNS} FROM reports ORDER BY id DESC").fetchall()
+        return [self._row(r) for r in rows]
+
+    def get(self, report_id: int) -> Optional[Dict[str, Any]]:
+        """One report with its payload (a dict) and snapshot (PNG bytes or None)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT {self.LIST_COLUMNS}, payload, snapshot FROM reports WHERE id = ?", (report_id,)).fetchone()
+        if not row:
+            return None
+        out = self._row(row)
+        try:
+            out["payload"] = json.loads(row[7])
+        except ValueError:
+            out["payload"] = {}
+        out["snapshot"] = bytes(row[8]) if row[8] else None
+        return out
+
+    def all_full(self) -> List[Dict[str, Any]]:
+        """Every report in full, oldest first (the export)."""
+        return [r for r in (self.get(row["id"]) for row in reversed(self.list())) if r]
+
+    def delete(self, report_id: int) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+
+    def count(self) -> int:
+        with self._conn() as conn:
+            return conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
+
+    def latest_for(self, term: str) -> Optional[Dict[str, Any]]:
+        """The newest report of `term` (case-insensitive), without payload and snapshot; the "!" button shows
+        a term with a report as reported."""
+        with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT {self.LIST_COLUMNS} FROM reports WHERE lower(term) = ? ORDER BY id DESC LIMIT 1",
+                (term.strip().lower(),)).fetchone()
+        return self._row(row) if row else None
+
+    def set_note(self, report_id: int, note: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE reports SET note = ? WHERE id = ?", (self.clean_note(note), report_id))
+
+    @staticmethod
+    def clean_note(note: str) -> str:
+        return " ".join(note.split())[:300]
+
+    @staticmethod
+    def _row(r: tuple) -> Dict[str, Any]:
+        return {"id": r[0], "term": r[1], "kind": r[2], "created_at": r[3], "note": r[4],
+                "engine_version": r[5], "app_version": r[6]}

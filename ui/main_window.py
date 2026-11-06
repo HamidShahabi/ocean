@@ -1,5 +1,6 @@
 """The main window: top bar, home page and navigation. It wires the pages together; the pages
 themselves live in results_page.py and drawer.py (history, settings)."""
+import copy
 import logging
 import os
 import re
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 import desktop_lookup
 import lexical_engine
+import report_export
 import storage
 from ui import theme
 from ui.config import DB_FILE, SettingsManager
@@ -46,6 +48,7 @@ class MainWindow(QMainWindow):
 
         self.settings = SettingsManager()
         self.db = storage.HistoryStore(DB_FILE)
+        self.reports = storage.ReportStore(DB_FILE)
         self.speaker = NeuralSpeaker(self.settings)
         self.current_term: Optional[str] = None
         self.current_data: Optional[Dict[str, Any]] = None
@@ -53,9 +56,16 @@ class MainWindow(QMainWindow):
         self.sug_worker: Optional[SuggestionWorker] = None
 
         self._stale_copy: Optional[Dict[str, Any]] = None  # saved copy being refreshed, shown if the refetch fails
-        self.nav_history: List[str] = []
+        # Back/forward steps: {"term", "payload"}. A step with a payload shows that saved output as it was
+        # (the result before a refresh); one without it looks the term up (the history serves the latest).
+        self.nav_history: List[Dict[str, Any]] = []
         self.nav_index: int = -1
         self._navigating_history: bool = False
+        self._refreshing: bool = False  # a manual Refresh is running: the current result stays on screen
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.timeout.connect(self._clear_flash_status)
+        self._flash_text = ""
 
         self.sug_popup = GlassSuggestionPopup(self)
         self.sug_popup.item_selected.connect(self._on_suggestion_picked)
@@ -246,7 +256,7 @@ class MainWindow(QMainWindow):
 
         self.input_box = QLineEdit()
         self.input_box.setObjectName("SearchInput")
-        self.input_box.setPlaceholderText("Search English or Persian: a word, idiom, collocation, or sentence...")
+        self.input_box.setPlaceholderText("Explore words, idioms, or phrases...")
         self.input_box.setMinimumHeight(36)
         self.input_box.returnPressed.connect(lambda: self._analyze_input(force_refresh=False))
         sc_lay.addWidget(self.input_box, stretch=1)
@@ -278,6 +288,7 @@ class MainWindow(QMainWindow):
 
         ctrl_enter = QShortcut(QKeySequence("Ctrl+Return"), self)
         ctrl_enter.activated.connect(lambda: self._analyze_input(force_refresh=False))
+        self._update_nav_visibility()
 
     def _update_search_button_mode(self) -> None:
         is_dark = self.settings.data.get("theme", "Dark Mode") == "Dark Mode"
@@ -304,21 +315,64 @@ class MainWindow(QMainWindow):
         self.back_btn.setEnabled(self.nav_index > 0)
         self.fwd_btn.setEnabled(0 <= self.nav_index < len(self.nav_history) - 1)
 
+    def _update_nav_visibility(self) -> None:
+        """The Ocean button and Back/Forward are for pages after the home page; home itself has none of them."""
+        on_home = self.stack.currentIndex() == 0
+        for w in (self.home_logo_btn, self.back_btn, self.fwd_btn):
+            w.setVisible(not on_home)
+
+    def _push_nav(self, term: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        """A new step after the current one (the steps that were ahead of it are dropped)."""
+        self.nav_history = self.nav_history[: self.nav_index + 1]
+        self.nav_history.append({"term": term, "payload": payload})
+        self.nav_index = len(self.nav_history) - 1
+        self._update_nav_buttons()
+
     def _go_back(self) -> None:
         if self.nav_index > 0:
-            self.nav_index -= 1
-            self._navigating_history = True
-            self._analyze_input(force_refresh=False, override_term=self.nav_history[self.nav_index])
-            self._navigating_history = False
-            self._update_nav_buttons()
+            self._go_to_step(self.nav_index - 1)
 
     def _go_forward(self) -> None:
         if self.nav_index < len(self.nav_history) - 1:
-            self.nav_index += 1
-            self._navigating_history = True
-            self._analyze_input(force_refresh=False, override_term=self.nav_history[self.nav_index])
+            self._go_to_step(self.nav_index + 1)
+
+    def _go_to_step(self, index: int) -> None:
+        self.nav_index = index
+        step = self.nav_history[index]
+        self._navigating_history = True
+        try:
+            if step["payload"] is not None:
+                self._show_payload(step["term"], step["payload"])
+            else:
+                self._analyze_input(force_refresh=False, override_term=step["term"])
+        finally:
             self._navigating_history = False
-            self._update_nav_buttons()
+        self._update_nav_buttons()
+
+    def _show_payload(self, term: str, payload: Dict[str, Any]) -> None:
+        """Show an output exactly as it was kept (before a refresh, or from a report), without any lookup."""
+        self.sug_popup.hide()
+        self.worker = None  # any lookup still running is now stale
+        self._refreshing = False
+        self._stale_copy = None
+        self.explore_btn.setEnabled(True)
+        self.input_box.setText(term)
+        self._switch_to_results_view()
+        saved = self.db.get_entry(term)
+        data = dict(payload, _is_favorite=bool(saved and saved["_is_favorite"]))
+        self.current_term = term
+        self.current_data = data
+        self.results_page.render(term, data)
+        self.status_label.setText("")
+
+    def open_report(self, report_id: int) -> None:
+        """Re-show a reported entry as it was reported (as a step of its own, so Back returns to where you were)."""
+        report = self.reports.get(report_id)
+        if report is None:
+            return
+        payload = {k: v for k, v in report["payload"].items() if not k.startswith("_")}
+        self._push_nav(report["term"], payload)
+        self._show_payload(report["term"], payload)
 
     def go_home(self) -> None:
         self.sug_popup.hide()
@@ -326,9 +380,14 @@ class MainWindow(QMainWindow):
         self.status_label.setText("")
         self.current_term = None
         self.current_data = None
+        self.worker = None  # a lookup still running must not draw a result over the home page
+        self._refreshing = False
+        self._stale_copy = None
+        self.explore_btn.setEnabled(True)
         self.search_bar_wrapper.setParent(self.home_page)
         self.home_vbox.insertWidget(2, self.search_bar_wrapper, alignment=Qt.AlignmentFlag.AlignHCenter)
         self.stack.setCurrentIndex(0)
+        self._update_nav_visibility()
         self._update_search_button_mode()
         self.input_box.setFocus()
 
@@ -362,6 +421,7 @@ class MainWindow(QMainWindow):
             self.search_bar_wrapper.setParent(self.results_page)
             self.results_page.top_search_slot.addWidget(self.search_bar_wrapper)
             self.stack.setCurrentIndex(1)
+            self._update_nav_visibility()
             self._update_search_button_mode()
 
     def _trigger_live_suggestions(self) -> None:
@@ -388,6 +448,8 @@ class MainWindow(QMainWindow):
         self._analyze_input(force_refresh=False)
 
     def _analyze_input(self, force_refresh: bool = False, override_term: Optional[str] = None) -> None:
+        """Look a term up. `force_refresh` (the Refresh button) skips the saved copy and asks the engine for a
+        better result, while the current one stays on screen."""
         self.sug_popup.hide()
         if override_term:
             self.input_box.setText(override_term)
@@ -396,10 +458,8 @@ class MainWindow(QMainWindow):
             return
 
         if not self._navigating_history:
-            if self.nav_index == -1 or (self.nav_history and self.nav_history[self.nav_index].lower() != term.lower()):
-                self.nav_history = self.nav_history[: self.nav_index + 1]
-                self.nav_history.append(term)
-                self.nav_index = len(self.nav_history) - 1
+            if self.nav_index == -1 or self.nav_history[self.nav_index]["term"].lower() != term.lower():
+                self._push_nav(term)
             self._update_nav_buttons()
 
         self._switch_to_results_view()
@@ -408,7 +468,11 @@ class MainWindow(QMainWindow):
             # A user-initiated lookup (cached or fresh) goes to the top of the history; refreshes and back/forward do not.
             self.db.touch_entry(term)
         self._stale_copy = None
-        if not force_refresh:
+        self._refreshing = force_refresh
+        if force_refresh:
+            if self.current_data is not None and (self.current_term or "").strip().lower() == term.lower():
+                self._stale_copy = self.current_data  # what is on screen: kept if the refresh brings nothing better
+        else:
             cached = self.db.get_entry(term)
             if cached and (cached.get("senses") or cached.get("is_sentence")):
                 if self._should_refresh(cached):
@@ -424,16 +488,27 @@ class MainWindow(QMainWindow):
                 return
 
         self.explore_btn.setEnabled(False)
-        if self._stale_copy is not None:
+        if force_refresh:
+            self.status_label.setText(f"Refreshing '{term}' with online resources...")
+        elif self._stale_copy is not None:
             self.status_label.setText(f"Refreshing '{term}'...")
         else:
             self.status_label.setText(f"Analyzing '{term}'...")
 
-        self.worker = EngineWorker(term)
+        # The one place a refresh reaches the engine (see EngineWorker): online sources are queried again.
+        self.worker = EngineWorker(term, refresh=True) if force_refresh else EngineWorker(term)
         self.worker.preview_ready.connect(self._on_preview)
         self.worker.finished_success.connect(self._on_inference_success)
         self.worker.finished_error.connect(self._on_inference_error)
         start_worker(self.worker)
+
+    def refresh_current(self) -> None:
+        """The Refresh button: fetch an improved result for what is on screen."""
+        if self.worker is not None:
+            return  # a lookup is already running
+        term = self.current_term or self.input_box.text().strip()
+        if term:
+            self._analyze_input(force_refresh=True, override_term=term)
 
     def _should_refresh(self, cached: Dict[str, Any]) -> bool:
         """A saved entry older than the Settings refresh period (or from an older engine) is fetched again
@@ -452,8 +527,8 @@ class MainWindow(QMainWindow):
     def _on_preview(self, term: str, data: Dict[str, Any]) -> None:
         """Show what the local data says straight away; the full entry replaces it when its Persian is ready
         (or, for a refresh that fails, the saved copy does)."""
-        if self.sender() is not self.worker:
-            return
+        if self.sender() is not self.worker or self._refreshing:
+            return  # (a manual refresh keeps the result on screen until the improved one is ready)
         lexical_engine.apply_user_overrides(data)
         self.current_term = term
         self.current_data = None  # nothing to edit or save until the full entry arrives
@@ -466,8 +541,10 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.explore_btn.setEnabled(True)
         stale, self._stale_copy = self._stale_copy, None
+        manual, self._refreshing = self._refreshing, False
         if stale is not None and not storage.refresh_replaces(stale, data):
-            self._show_stale_copy(stale, "Couldn't refresh - showing your saved copy")
+            self._show_stale_copy(stale, "No better result found - kept the current one" if manual
+                                  else "Couldn't refresh - showing your saved copy")
             return
         lexical_engine.apply_user_overrides(data)  # a refresh must not undo your manual Persian edits
         self.input_box.setText(data.get("headword", term))
@@ -476,8 +553,28 @@ class MainWindow(QMainWindow):
         self.current_term = term
         self.current_data = saved
         self.right_drawer.refresh_history()
+        if manual and stale is not None:
+            self._record_refresh_step(term, stale, saved)
         self.results_page.render(term, saved)
         self.status_label.setText("")
+        if manual:
+            self._flash_status("Refreshed" if not self._same_output(stale, saved) else "Already the best result")
+
+    @staticmethod
+    def _same_output(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
+        def strip(d: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+            return {k: v for k, v in (d or {}).items() if not k.startswith("_")}
+        return strip(a) == strip(b)
+
+    def _record_refresh_step(self, term: str, before: Dict[str, Any], after: Dict[str, Any]) -> None:
+        """Make the output before a refresh a Back step of its own: Back shows it again, Forward the refreshed one."""
+        if self._same_output(before, after):
+            return
+        step = self.nav_history[self.nav_index] if 0 <= self.nav_index < len(self.nav_history) else None
+        if step is None or step["term"].lower() != term.lower():
+            self._push_nav(term)
+        self.nav_history[self.nav_index]["payload"] = copy.deepcopy({k: v for k, v in before.items() if not k.startswith("_")})
+        self._push_nav(term)
 
     def _on_inference_error(self, error_msg: str) -> None:
         if self.sender() is not self.worker:
@@ -485,11 +582,37 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.explore_btn.setEnabled(True)
         stale, self._stale_copy = self._stale_copy, None
+        manual, self._refreshing = self._refreshing, False
         if stale is not None:
-            self._show_stale_copy(stale, "Couldn't refresh - showing your saved copy")
+            self._show_stale_copy(stale, "Couldn't refresh - kept the current result" if manual
+                                  else "Couldn't refresh - showing your saved copy")
             return
         self.status_label.setText("")
         QMessageBox.warning(self, "Ocean Notice", error_msg)
+
+    # --- status line and reports ---
+    def _flash_status(self, text: str, ms: int = 4000) -> None:
+        """Show `text` in the top bar for a few seconds (unless something else replaces it first)."""
+        self.status_label.setText(text)
+        self._flash_text = text
+        self._status_timer.start(ms)
+
+    def _clear_flash_status(self) -> None:
+        if self.status_label.text() == self._flash_text:
+            self.status_label.setText("")
+
+    def report_result(self, term: str, data: Dict[str, Any], snapshot: Optional[bytes]) -> int:
+        """Record a report of the result on screen (the "!" button) and confirm it in the top bar."""
+        report_id = self.reports.add(term, data, snapshot=snapshot, app_version=report_export.app_version())
+        self.reports_changed()
+        self._flash_status(f"Reported '{term}' - see Menu > Reports")
+        return report_id
+
+    def reports_changed(self) -> None:
+        """Reports were added, edited or deleted: bring the Reports page and the "!" button up to date."""
+        if self.right_drawer.isVisible():
+            self.right_drawer.reports_page.populate()
+        self.results_page.sync_report_button()
 
     def _apply_theme(self) -> None:
         is_dark = self.settings.data.get("theme", "Dark Mode") == "Dark Mode"
