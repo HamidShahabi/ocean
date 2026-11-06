@@ -12,8 +12,8 @@ USE
   - Click the speaker buttons to hear pronunciation.
   - Click "Save" (star) on a word to keep it in your saved words (Menu >
     History > Saved Favorites Only).
-  - Look up from any app: copy a word (Ctrl+C), then press Ctrl+Alt+O while
-    Ocean is running.
+  - Look up from any app: select a word and press Ctrl+C twice while Ocean
+    is running (or copy it and press Alt+Q).
 
 Works offline: the dictionary is on your computer. Without internet, Persian
 the dictionary doesn't have comes from an offline translator (lower quality).
