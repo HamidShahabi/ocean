@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +27,7 @@ import storage
 from ui import theme
 from ui.config import DB_FILE, SettingsManager
 from ui.drawer import AttachedRightDrawer
+from ui.motion import FadeStackedWidget
 from ui.results_page import ResultsPage
 from ui.speaker import NeuralSpeaker
 from ui.theme import THEME_COLORS, VectorIcons
@@ -35,6 +35,10 @@ from ui.widgets import GlassPopupMenu, GlassSuggestionPopup, PersianTranslationW
 from ui.workers import EngineWorker, SuggestionWorker, start_worker
 
 log = logging.getLogger("ocean.app")
+
+_FILTERED_EVENTS = frozenset({
+    QEvent.Type.ContextMenu, QEvent.Type.MouseButtonPress, QEvent.Type.Wheel, QEvent.Type.WindowDeactivate, QEvent.Type.KeyPress,
+})
 
 
 class MainWindow(QMainWindow):
@@ -122,7 +126,7 @@ class MainWindow(QMainWindow):
         menu.option_picked.connect(_handle_action)
         menu.list_widget.clear()
         for opt in options:
-            it = QListWidgetItem(f"   {opt}")
+            it = QListWidgetItem(opt)
             it.setData(Qt.ItemDataRole.UserRole, opt)
             menu.list_widget.addItem(it)
 
@@ -133,6 +137,10 @@ class MainWindow(QMainWindow):
         menu.show()
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        # Installed on the whole application, so this runs for every event: bail out early for the
+        # overwhelming majority (paint, timer, mouse move...) that it never looks at.
+        if event.type() not in _FILTERED_EVENTS:
+            return False
         if event.type() == QEvent.Type.ContextMenu:
             if isinstance(obj, (QLineEdit, QLabel)):
                 self._show_custom_context_menu(obj, QCursor.pos())
@@ -208,7 +216,7 @@ class MainWindow(QMainWindow):
         workspace_row.setContentsMargins(0, 0, 0, 0)
         workspace_row.setSpacing(16)
 
-        self.stack = QStackedWidget()
+        self.stack = FadeStackedWidget()
         workspace_row.addWidget(self.stack, stretch=1)
 
         self.right_drawer = AttachedRightDrawer(self)
@@ -280,8 +288,7 @@ class MainWindow(QMainWindow):
         ctrl_enter.activated.connect(lambda: self._analyze_input(force_refresh=False))
 
     def _update_search_button_mode(self) -> None:
-        is_dark = self.settings.data.get("theme", "Dark Mode") == "Dark Mode"
-        fg_col = "#0E1621" if is_dark else "#FFFFFF"
+        fg_col = THEME_COLORS["on_primary"]
         if self.stack.currentIndex() == 0:
             self.explore_btn.setIcon(QIcon())
             self.explore_btn.setText("Explore")
@@ -321,6 +328,7 @@ class MainWindow(QMainWindow):
             self._update_nav_buttons()
 
     def go_home(self) -> None:
+        self.stack.begin_fade()
         self.sug_popup.hide()
         self.input_box.clear()
         self.status_label.setText("")
@@ -359,6 +367,7 @@ class MainWindow(QMainWindow):
 
     def _switch_to_results_view(self) -> None:
         if self.stack.currentIndex() != 1:
+            self.stack.begin_fade()
             self.search_bar_wrapper.setParent(self.results_page)
             self.results_page.top_search_slot.addWidget(self.search_bar_wrapper)
             self.stack.setCurrentIndex(1)
@@ -492,11 +501,10 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Ocean Notice", error_msg)
 
     def _apply_theme(self) -> None:
-        is_dark = self.settings.data.get("theme", "Dark Mode") == "Dark Mode"
         qss = theme.apply_theme(self.settings.data)
 
         c = THEME_COLORS
-        theme.sync_windows_titlebar(self, is_dark, c["bg_main"])
+        theme.sync_windows_titlebar(self, theme.is_dark_theme(self.settings.data), c["bg_main"], c["text_main"])
 
         icon_fg = c["text_main"]
         self.menu_btn.setIcon(VectorIcons.hamburger_icon(icon_fg))

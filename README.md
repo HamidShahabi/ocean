@@ -97,6 +97,14 @@ Every source is on your computer (see [Dictionary data](#dictionary-data)), so a
 
 ## Settings
 
+### Theme, fonts and motion
+
+**Dark Mode** and **Light Mode** are a hand-tuned Material 3 palette (Google-style neutral surfaces, one blue accent) in `ui/theme.py`; the saved values `Dark Mode` / `Light Mode` did not change. A ready-made Qt style sheet was not used: PyQtDarkTheme (MIT) was last released in December 2022 and requires Python below 3.12, which the build uses; QDarkStyle (MIT) was last released in November 2023; qt-material (BSD-2) is maintained but bundles its own fonts and themes. All three restyle every widget and would fight Ocean's custom frames, capsule dropdowns and cards, so the palette is plain data in the repository with no extra dependency to bundle.
+
+Fonts are in `fonts/` (all SIL OFL, licence files included): **Google Sans Flex** for English (static Regular/Medium/SemiBold/Bold instances cut from the variable font, because variable-font axes are unreliable in Qt on Windows), **Vazirmatn** for Persian, and **Charis SIL** for pronunciations only (it covers every IPA symbol; Google Sans Flex has none). To regenerate the Google Sans Flex files: download `GoogleSansFlex[ROND,opsz,slnt,wdth,wght].ttf` from `google/fonts` (`ofl/googlesansflex`), and with `fonttools` run `fontTools.varLib.instancer` for `wght` 400/500/600/700, `wdth=100`, `opsz=18`, `ROND=0`, `slnt=0`.
+
+Windows, pages and the menu fade for about 0.2 seconds. Set the environment variable `OCEAN_REDUCE_MOTION=1`, or turn off "Show animations in Windows", to switch the fades off. Text that is wider than its box (a long dropdown value or option) ends in an ellipsis and scrolls sideways while the pointer is over it.
+
 ### Voice
 
 Pronunciation uses the Kokoro neural voice. The setup script downloads the small int8 model (`kokoro-v1.0.int8.onnx`, ~88 MB). If you already have the full-size `kokoro-v1.0.onnx` (~310 MB) next to the app it keeps working, but the int8 file is preferred when both are present. Delete the full-size file to save space.
@@ -159,6 +167,8 @@ History, favourites, your translation fixes, settings and the log file (`ocean.l
 Data from older versions (kept next to the app) is copied there on first start.
 
 ## Credits and licences
+
+Fonts: [Google Sans Flex](https://github.com/googlefonts/googlesans-flex) (Google), [Vazirmatn](https://github.com/rastikerdar/vazirmatn) (Saber Rastikerdar) and [Charis SIL](https://software.sil.org/charis/) (SIL International), all under the [SIL Open Font License 1.1](https://openfontlicense.org); the licence texts are in `fonts/`.
 
 The dictionary database (see [Dictionary data](#dictionary-data)) redistributes:
 

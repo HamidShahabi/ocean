@@ -1,12 +1,15 @@
 """The attached right-hand drawer: a menu plus the history and settings pages."""
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QSize
+from typing import Optional
+
+from PyQt6.QtCore import QPoint, QRect, Qt, QSize
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ui.history_page import HistoryPage
 from ui.settings_page import SettingsPage
+from ui.motion import DRAWER_FADE_MS, Crossfade, FadeStackedWidget
 from ui.theme import VectorIcons
 from ui.widgets import SmoothGlassFrame
 
@@ -21,7 +24,40 @@ class AttachedRightDrawer(SmoothGlassFrame):
         super().__init__(radius=22, variant="drawer", parent=main_win)
         self.main_win = main_win
         self.setFixedWidth(400)
+        self._workspace_fade: Optional[Crossfade] = None
+        self._changing = False
         self._build_drawer()
+
+    # Opening and closing the drawer re-lays out the whole workspace, so both go through one
+    # cross-fade (with the drawer sliding in or out): see ui/motion.py. Hooking setVisible covers
+    # every caller (menu button, Settings "Save", ...).
+    def _workspace(self) -> Crossfade:
+        if self._workspace_fade is None:
+            central = self.main_win.centralWidget()
+
+            def region() -> QRect:
+                top = self.main_win.stack.mapTo(central, QPoint(0, 0)).y()
+                return QRect(0, top, central.width(), central.height() - top)
+
+            def drawer_rect() -> Optional[QRect]:
+                return QRect(self.mapTo(central, QPoint(0, 0)), self.size()) if self.isVisible() else None
+
+            self._workspace_fade = Crossfade(central, region, drawer_rect, duration=DRAWER_FADE_MS)
+        return self._workspace_fade
+
+    def setVisible(self, visible: bool) -> None:
+        if visible == self.isVisible() or self._changing:
+            super().setVisible(visible)
+            return
+
+        def change() -> None:
+            self._changing = True
+            try:
+                SmoothGlassFrame.setVisible(self, visible)
+            finally:
+                self._changing = False
+
+        self._workspace().run(change)
 
     def _build_drawer(self) -> None:
         vbox = QVBoxLayout(self)
@@ -46,7 +82,7 @@ class AttachedRightDrawer(SmoothGlassFrame):
 
         vbox.addLayout(header)
 
-        self.stack = QStackedWidget()
+        self.stack = FadeStackedWidget()
         vbox.addWidget(self.stack, stretch=1)
 
         # Main menu (page 0); the other pages are separate widgets
@@ -82,6 +118,7 @@ class AttachedRightDrawer(SmoothGlassFrame):
             self.stack.addWidget(self.pages[index])
 
     def show_page(self, index: int) -> None:
+        self.stack.begin_fade()
         titles = {PAGE_MENU: "Ocean Menu", PAGE_HISTORY: "History", PAGE_SETTINGS: "Settings"}
         self.drawer_title.setText(titles.get(index, "Ocean Menu"))
         self.back_menu_btn.setVisible(index != PAGE_MENU)

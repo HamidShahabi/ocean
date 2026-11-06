@@ -268,12 +268,12 @@ class UiSmokeTest(unittest.TestCase):
         with mock.patch.object(self.win.settings, "save"):
             page._apply_live()
         self.assertEqual(self.win.settings.data["theme"], "Light Mode")
-        self.assertEqual(theme.THEME_COLORS["bg_main"], "#F6F8FA")
-        self.assertIn("#F6F8FA", self.win.styleSheet())
+        self.assertEqual(theme.THEME_COLORS["bg_main"], theme.LIGHT_COLORS["bg_main"])
+        self.assertIn(theme.LIGHT_COLORS["bg_main"], self.win.styleSheet())
         page.theme_drop.setCurrentText("Dark Mode")
         with mock.patch.object(self.win.settings, "save"):
             page._save_and_close()
-        self.assertEqual(theme.THEME_COLORS["bg_main"], "#0E1621")
+        self.assertEqual(theme.THEME_COLORS["bg_main"], theme.DARK_COLORS["bg_main"])
         self.assertFalse(self.win.right_drawer.isVisible())
 
     def test_synonyms_are_grouped_under_their_sense_and_derived_terms_show(self):
