@@ -163,7 +163,7 @@ class PagesUiTest(unittest.TestCase):
             "root": "happy", "structure": "un-  (Prefix)  +  happy  (Root)  +  -ness  (Suffix)   →   unhappiness",
             "prefix": "un-  (not)", "suffix": "-ness  [Noun: state or quality]",
             "family": [{"word": "happy", "pos": "Adjective"}, {"word": "happiness", "pos": "Noun"}]},
-            derived_terms=["happy hour", "happy birthday"])
+            common_expressions=["happy hour", "happy birthday"])
         self.win.results_page.render("unhappiness", dict(payload, headword="unhappiness"))
         texts = card_texts(self.win)
         self.assertIn("3. Forms, Roots & Alternatives", texts)
@@ -177,7 +177,7 @@ class PagesUiTest(unittest.TestCase):
         self.assertTrue({"happy hour", "happy birthday", "Noun: happiness"} <= pills)
 
     def test_empty_morphology_parts_are_hidden(self):
-        payload = dict(WORD, headword="privilege", derived_terms=[],
+        payload = dict(WORD, headword="privilege", common_expressions=[],
                        morphology={"root": "privilege", "structure": "privilege (Base Root Word)", "prefix": "None",
                                    "suffix": "None (Base Word)", "family": [{"word": "privilege", "pos": "Noun"}]})
         self.win.results_page.render("privilege", payload)
@@ -186,12 +186,12 @@ class PagesUiTest(unittest.TestCase):
             self.assertNotIn(noise, joined)
         self.assertIn("Base word", card_texts(self.win))
 
-    def test_common_expressions_accept_renamed_keys_and_dict_items(self):
-        payload = dict(WORD, derived_terms=[], common_expressions=[{"term": "pure luck"}, "sheer luck", {"term": "pure luck"}])
+    def test_common_expressions_are_read_from_the_engine_key_only(self):
+        payload = dict(WORD, common_expressions=["pure luck", "sheer luck"], derived_terms=["old name"])
         self.win.results_page.render("serendipity", payload)
         pills = [b.text() for b in self.win.results_page.cards_container.findChildren(QPushButton)]
-        self.assertEqual(pills.count("pure luck"), 1)
-        self.assertIn("sheer luck", pills)
+        self.assertTrue({"pure luck", "sheer luck"} <= set(pills))
+        self.assertNotIn("old name", pills)
 
     # --- refresh and Back (005.1) ---
     def test_refresh_queries_online_resources_and_back_returns_to_the_output_before_it(self):

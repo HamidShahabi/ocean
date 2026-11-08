@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 import lexical_engine
 from ui.flow_layout import FlowLayout
 from ui.reports_page import ReportPopover
-from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS
+from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS, style_ipa_label
 from ui.widgets import PersianTranslationWidget, SmoothGlassFrame, create_audio_button
 
 if TYPE_CHECKING:
@@ -110,6 +110,16 @@ class ResultsPage(QWidget):
         btn.clicked.connect(lambda _, w=word_text: self.main_win._analyze_input(False, w))
         return btn
 
+    @staticmethod
+    def _create_ipa_label(text: str, wrap: bool = False) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setWordWrap(wrap)
+        if wrap:
+            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        style_ipa_label(lbl)
+        return lbl
+
     def _create_persian_widget(self, text: str, en_source: str = "", large: bool = False) -> PersianTranslationWidget:
         px = int(self.main_win.settings.data.get("base_font_px", 14))
         mode = self.main_win.settings.data.get("learning_mode", "Click to Reveal Persian")
@@ -187,10 +197,7 @@ class ResultsPage(QWidget):
         top_row.addWidget(self._create_clickable_word_link(term))
 
         if ipa:
-            ipa_lbl = QLabel(ipa)
-            ipa_lbl.setObjectName("IpaText")
-            ipa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            top_row.addWidget(ipa_lbl)
+            top_row.addWidget(self._create_ipa_label(ipa))
 
         top_row.addWidget(self._create_persian_widget(fa, en_source=term, large=False), stretch=1)
         b_lay.addLayout(top_row)
@@ -211,11 +218,7 @@ class ResultsPage(QWidget):
             ex_col.addWidget(ex_lbl)
 
             if ex_ipa:
-                s_ipa_lbl = QLabel(ex_ipa)
-                s_ipa_lbl.setWordWrap(True)
-                s_ipa_lbl.setObjectName("IpaText")
-                s_ipa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                ex_col.addWidget(s_ipa_lbl)
+                ex_col.addWidget(self._create_ipa_label(ex_ipa, wrap=True))
 
             ex_row.addLayout(ex_col, stretch=1)
             b_lay.addLayout(ex_row)
@@ -323,16 +326,32 @@ class ResultsPage(QWidget):
             self._create_clickable_word_link(w, f"{pos}: " if pos else "") for w, pos in family[:8]]))
         return box
 
-    def _build_expressions_box(self, data: Dict[str, Any], morph: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
-        """Common expressions built on the word. The engine's list is read from whichever of the known keys
-        holds it (items are strings or dicts), so a rename on that side does not blank the section."""
-        raw = next((v for v in (data.get("common_expressions"), data.get("derived_terms"),
-                                morph.get("common_expressions")) if v), [])
-        terms = list(dict.fromkeys(t for t in (_term_of(x, "term", "expression", "text", "word") for x in raw) if t))
+    def _build_expressions_box(self, data: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
+        """Common expressions built on the word (the engine's `common_expressions`, a list of strings)."""
+        terms = data.get("common_expressions") or []
         if not terms:
             return None
         box, lay = self._subsection("Common Expressions")
         lay.addWidget(self._pill_flow([self._create_clickable_word_link(t) for t in terms[:12]]))
+        return box
+
+    def _build_forms_box(self, data: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
+        """Inflected forms ("past tense: ran"; the engine's `forms`, each {"form", "label"})."""
+        forms = [f for f in data.get("forms") or [] if f.get("form")]
+        if not forms:
+            return None
+        box, lay = self._subsection("Forms")
+        lay.addWidget(self._pill_flow([
+            self._create_clickable_word_link(f["form"], f"{f['label']}: " if f.get("label") else "") for f in forms]))
+        return box
+
+    def _build_alternatives_box(self, data: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
+        """Alternative spellings of the word (the engine's `alternatives`, a list of strings)."""
+        words = data.get("alternatives") or []
+        if not words:
+            return None
+        box, lay = self._subsection("Alternative Spellings")
+        lay.addWidget(self._pill_flow([self._create_clickable_word_link(w) for w in words]))
         return box
 
     def _build_relation_box(self, title: str, items: List[Dict[str, str]]) -> SmoothGlassFrame:
@@ -556,12 +575,7 @@ class ResultsPage(QWidget):
             line1_row.addWidget(sent_lbl, 1)
             hw_vbox.addLayout(line1_row)
 
-            ipa_lbl = QLabel(f"US  {ipa_us}")
-            ipa_lbl.setWordWrap(True)
-            ipa_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            ipa_lbl.setObjectName("IpaText")
-            ipa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            hw_vbox.addWidget(ipa_lbl)
+            hw_vbox.addWidget(self._create_ipa_label(f"US  {ipa_us}", wrap=True))
 
             hw_vbox.addWidget(self._create_persian_widget(fa_equiv, en_source=headword, large=True))
         else:
@@ -577,14 +591,17 @@ class ResultsPage(QWidget):
             hw_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             hw_lay.addWidget(hw_lbl)
 
-            ipa_lbl = QLabel(f"US  {ipa_us}")
-            ipa_lbl.setObjectName("IpaText")
-            ipa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            hw_lay.addWidget(ipa_lbl)
+            hw_lay.addWidget(self._create_ipa_label(f"US  {ipa_us}"))
 
             hw_lay.addWidget(self._create_persian_widget(fa_equiv, en_source=headword, large=True), stretch=1)
 
         vbox1.addWidget(hw_box)
+        match = data.get("phrase_match")
+        if match:
+            note = QLabel(f"Showing the dictionary entry \u201c{match['entry']}\u201d for \u201c{match['typed']}\u201d.")
+            note.setObjectName("MutedText")
+            note.setWordWrap(True)
+            vbox1.addWidget(note)
         badge_row = self._create_level_badges(data)
         if badge_row is not None:
             vbox1.addLayout(badge_row)
@@ -626,11 +643,7 @@ class ResultsPage(QWidget):
                 ex_col.addWidget(en_sent_lbl)
 
                 if ex_ipa:
-                    ipa_sent_lbl = QLabel(ex_ipa)
-                    ipa_sent_lbl.setWordWrap(True)
-                    ipa_sent_lbl.setObjectName("IpaText")
-                    ipa_sent_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                    ex_col.addWidget(ipa_sent_lbl)
+                    ex_col.addWidget(self._create_ipa_label(ex_ipa, wrap=True))
 
                 ex_row.addLayout(ex_col, stretch=1)
                 s_vbox.addLayout(ex_row)
@@ -655,10 +668,7 @@ class ResultsPage(QWidget):
                 top_r.addWidget(self._create_audio_button(kt["term"]))
                 top_r.addWidget(self._create_clickable_word_link(kt["term"]))
 
-                ipa_l = QLabel(kt.get("ipa", ""))
-                ipa_l.setObjectName("IpaText")
-                ipa_l.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                top_r.addWidget(ipa_l)
+                top_r.addWidget(self._create_ipa_label(kt.get("ipa", "")))
 
                 top_r.addWidget(self._create_persian_widget(kt.get("fa", ""), en_source=kt["term"], large=False), stretch=1)
                 kt_lay.addLayout(top_r)
@@ -689,8 +699,9 @@ class ResultsPage(QWidget):
 
         subsections: List[QWidget] = []
         if not is_idiom and not is_sentence:
-            subsections += [self._build_root_box(headword, morph), self._build_family_box(headword, morph),
-                            self._build_expressions_box(data, morph)]
+            subsections += [self._build_root_box(headword, morph), self._build_forms_box(data),
+                            self._build_family_box(headword, morph), self._build_expressions_box(data),
+                            self._build_alternatives_box(data)]
         if syns:
             subsections.append(self._build_relation_box("Synonyms", syns))
         if ants:

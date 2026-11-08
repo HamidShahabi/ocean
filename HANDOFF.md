@@ -10,7 +10,7 @@ If a session needs them, attach them again.
 
 | Branch | Base | State |
 |---|---|---|
-| `upgrade-2` | `main` | Integration branch, about 70% of the spec. `upgrade/d-engine` is merged (2026-11-09); all 429 tests pass. |
+| `upgrade-2` | `main` | Integration branch, about 70% of the spec. `upgrade/d-engine` is merged (2026-11-09); all 432 tests pass. |
 | `upgrade/d-engine` | `main` (**not** `upgrade-2`) | Engine rewrite, merged into `upgrade-2`. |
 | `upgrade/e-data` | `upgrade-2` | Idiom list (9,383 rows) and `tools/build_idioms.py`. Persian translations and the slang table are not done. |
 
@@ -48,9 +48,7 @@ If a session needs them, attach them again.
 ### Not done yet
 1. ~~Merge `upgrade/d-engine` into `upgrade-2`.~~ Done. Conflicts were README and three tests; the engine keeps `set_offline_only` as a hard switch, so `tests/test_offline_mode.py` stays.
 2. **Merge `upgrade/e-data` into `upgrade-2`.**
-3. **Match `ui/results_page.py` to the engine payload.**
-   - It currently reads `common_expressions`, then `derived_terms`, then `morphology["common_expressions"]`.
-   - Check the real keys the engine now returns for examples, synonyms, antonyms and idioms, and show them.
+3. ~~Match `ui/results_page.py` to the engine payload.~~ Done: reads `common_expressions` only, shows `forms`, `alternatives` and the `phrase_match` note, IPA labels go through `theme.style_ipa_label`. The engine still sends `derived_terms` as an alias nothing reads; drop it in item 8.
 4. **Match the Sources page** list and order to the engine's real routing:
    - definitions: Kaikki;
    - examples: OpenSubtitles first, then Tatoeba;

@@ -16,6 +16,7 @@ from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton  # noqa: E402
 
 import lexical_engine  # noqa: E402
+from lexicon_fixture import use_lexicon  # noqa: E402
 from ui import theme  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_REPORTS, PAGE_SETTINGS, PAGE_SOURCES  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
@@ -278,8 +279,8 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(theme.THEME_COLORS["bg_main"], theme.DARK_COLORS["bg_main"])
         self.assertFalse(self.win.right_drawer.isVisible())
 
-    def test_synonyms_are_grouped_under_their_sense_and_derived_terms_show(self):
-        payload = dict(WORD, derived_terms=["serendipitous", "serendipitously"], synonyms=[
+    def test_synonyms_are_grouped_under_their_sense_and_common_expressions_show(self):
+        payload = dict(WORD, common_expressions=["serendipitous", "serendipitously"], synonyms=[
             {"term": "luck", "fa": "شانس", "sense": "noun: an unknown force"},
             {"term": "fortune", "fa": "بخت", "sense": "noun: an unknown force"},
             {"term": "chance", "fa": "اتفاق", "sense": "noun: an unplanned event"},
@@ -293,6 +294,41 @@ class UiSmokeTest(unittest.TestCase):
         self.assertNotIn("Derived terms", " ".join(texts))
         links = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
         self.assertIn("serendipitously", links)
+
+    def test_forms_alternatives_and_the_phrase_match_note_show(self):
+        payload = dict(WORD, forms=[{"form": "serendipities", "label": "plural"}], alternatives=["serendipitee"],
+                       phrase_match={"typed": "breaking the ice", "entry": "break the ice", "dropped": [], "negated": False})
+        self.win.results_page.render("serendipity", payload)
+        texts = card_texts(self.win)
+        self.assertIn("Forms", texts)
+        self.assertIn("Alternative Spellings", texts)
+        self.assertIn("Showing the dictionary entry \u201cbreak the ice\u201d for \u201cbreaking the ice\u201d.", texts)
+        links = [b.text() for b in self.win.results_page.findChildren(QPushButton)]
+        self.assertIn("plural: serendipities", links)
+        self.assertIn("serendipitee", links)
+        self.win.results_page.render("serendipity", WORD)  # none of these keys: no empty sections
+        self.assertNotIn("Forms", card_texts(self.win))
+        self.assertNotIn("Alternative Spellings", card_texts(self.win))
+
+    def test_ipa_labels_use_the_ipa_style(self):
+        self.win.results_page.render("serendipity", dict(WORD, synonyms=[{"term": "luck", "fa": "x", "ipa": "/lʌk/"}]))
+        ipa = [l for l in self.win.results_page.findChildren(QLabel) if l.objectName() == theme.IPA_OBJECT_NAME]
+        self.assertTrue({"US  /ˌserənˈdɪpəti/", "/lʌk/"} <= {l.text() for l in ipa})
+
+    def test_a_real_engine_entry_renders(self):
+        use_lexicon(self)
+        for p in (
+            mock.patch.object(lexical_engine, "fetch_persian_word_meaning", lambda t, is_idiom=False, **kw: ("FA:" + t, "")),
+            mock.patch.object(lexical_engine, "translate_batch_fast",
+                              lambda sentences, short_terms: {s: "fa " + s for s in list(sentences) + list(short_terms)}),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        for term in ("bright", "break the ice", "breaking the ice"):
+            with self.subTest(term=term):
+                data = lexical_engine.analyze_with_dictionaries(term)
+                self.win.results_page.render(term, data)
+                self.assertTrue(any(data["headword"] in t for t in card_texts(self.win)))
 
     def test_persian_widget_uses_registered_font(self):
         self.win.results_page.render("serendipity", WORD)
