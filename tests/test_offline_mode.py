@@ -3,6 +3,7 @@ import os
 import socket
 import sys
 import tempfile
+import time
 import unittest
 import urllib.request
 from unittest import mock
@@ -21,16 +22,6 @@ from ui.workers import SuggestionWorker  # noqa: E402
 
 PERSIAN_WORD = "کتاب"  # کتاب
 PERSIAN_SENTENCE = "من امروز به مدرسه رفتم."
-
-
-def wordnet_installed():
-    try:
-        return bool(le.wn and le.wn.synsets("dog"))
-    except LookupError:
-        return False
-
-
-HAS_WORDNET = wordnet_installed()
 
 
 class NetworkTripwire:
@@ -118,11 +109,6 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
         self.seam = mock.patch.object(le, "smart_request", side_effect=AssertionError("smart_request called"))
         self.seam_mock = self.seam.start()
         self.addCleanup(self.seam.stop)
-        if not HAS_WORDNET:  # the NLTK corpus is a separate download; the offline paths work without it
-            for name in ("wn", "LEMMATIZER"):
-                patcher = mock.patch.object(le, name, None)
-                patcher.start()
-                self.addCleanup(patcher.stop)
 
     def assert_silent(self):
         self.assertEqual(self.net.attempts, [])
@@ -130,14 +116,14 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
 
     def test_word_lookup(self):
         data = le.analyze_with_dictionaries("run")
-        if HAS_WORDNET:
-            self.assertTrue(data["senses"])  # WordNet still answers
+        self.assertTrue(data["senses"])  # the local database answers
         self.assert_silent()
 
     def test_bundled_idiom_lookup(self):
-        data = le.analyze_with_dictionaries("spill the beans")
+        data = le.analyze_with_dictionaries("break the ice")
         self.assertTrue(data["is_idiom"])
         self.assertTrue(data["senses"])
+        self.assertEqual(data["persian_source"], le.FA_SOURCE_IDIOMS)
         self.assert_silent()
 
     def test_unknown_phrase_lookup(self):
@@ -186,7 +172,7 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
     def test_other_engine_entry_points(self):
         self.assertEqual(le.translate_via_clients5("hello"), "")
         self.assertEqual(le._google_fa_to_en(PERSIAN_WORD), ("", []))
-        self.assertIn("bank", le.fetch_verified_example_for_relation("bank", "Noun").lower())  # WordNet's or the corpora's
+        self.assertIn("bank", le.fetch_verified_example_for_relation("bank", "Noun").lower())  # a corpus sentence
         le.fetch_persian_word_meaning("zeitgeist")
         le.fetch_persian_word_meaning("under the weather", is_idiom=True)
         le.translate_batch_fast(["The cat sat on the mat today."], ["cat", "zeitgeist"])
@@ -207,11 +193,90 @@ class NoNetworkInOfflineModeTest(unittest.TestCase):
 
 
 class OnlineModeUnchangedTest(unittest.TestCase):
-    def test_lookup_still_tries_the_network_when_the_switch_is_off(self):
+    def test_lookup_still_tries_the_network_when_the_internet_is_there(self):
         use_lexicon(self)
-        with NetworkTripwire() as net, mock.patch.object(le, "wn", None), mock.patch.object(le, "LEMMATIZER", None):
+        with mock.patch.object(le, "_probe_connectivity", return_value=True), NetworkTripwire() as net:
             le.analyze_with_dictionaries("zeitgeist")
         self.assertIn("requests.Session.request", net.attempts)
+
+
+class AutomaticOfflineTest(unittest.TestCase):
+    """There is no Offline-only setting: the engine finds out by itself, quickly, and remembers it."""
+
+    def setUp(self):
+        le.forget_connectivity()
+        self.addCleanup(le.forget_connectivity)
+        self.addCleanup(le.set_offline_only, False)
+
+    def test_a_failed_probe_is_remembered_so_lookups_never_wait_again(self):
+        with mock.patch.object(le, "_probe_connectivity", return_value=False) as probe:
+            self.assertFalse(le.is_online())
+            self.assertFalse(le.is_online())
+            self.assertFalse(le.network_allowed())
+        probe.assert_called_once()  # one probe, then the memo answers
+
+    def test_the_memo_expires_and_a_success_is_remembered_too(self):
+        with mock.patch.object(le, "_probe_connectivity", side_effect=[False, True]) as probe, \
+                mock.patch.object(le.time, "monotonic", side_effect=[0.0, 0.0, 10.0, 100.0, 100.0, 120.0]):
+            self.assertFalse(le.is_online())  # at 0 s: offline for 60 s
+            self.assertFalse(le.is_online())  # at 10 s: from the memo
+            self.assertTrue(le.is_online())   # at 100 s: probed again, the connection is back
+            self.assertTrue(le.is_online())   # at 120 s: trusted for 30 s
+        self.assertEqual(probe.call_count, 2)
+
+    def test_a_refused_connection_marks_the_internet_gone_without_another_probe(self):
+        with mock.patch.object(le, "_probe_connectivity", return_value=True) as probe:
+            self.assertTrue(le.is_online())
+            try:
+                raise requests.ConnectionError("no route")
+            except requests.ConnectionError:
+                le._log_failure("a test request")
+            self.assertFalse(le.is_online())
+        probe.assert_called_once()
+
+    def test_a_timeout_is_not_taken_for_no_internet(self):
+        with mock.patch.object(le, "_probe_connectivity", return_value=True):
+            self.assertTrue(le.is_online())
+            try:
+                raise requests.ReadTimeout("slow server")
+            except requests.ReadTimeout:
+                le._log_failure("a test request")
+            self.assertTrue(le.is_online())
+
+    def test_forget_connectivity_probes_again(self):
+        with mock.patch.object(le, "_probe_connectivity", side_effect=[False, True]):
+            self.assertFalse(le.is_online())
+            le.forget_connectivity()
+            self.assertTrue(le.is_online())
+
+    def test_offline_only_wins_without_probing(self):
+        le.set_offline_only(True)
+        with mock.patch.object(le, "_probe_connectivity", side_effect=AssertionError("probed")):
+            self.assertFalse(le.is_online())
+
+    def test_the_probe_never_waits_longer_than_its_timeout(self):
+        import threading
+        stuck = threading.Event()
+        self.addCleanup(stuck.set)
+        with mock.patch.object(socket, "create_connection", side_effect=lambda *a, **k: stuck.wait(5)):
+            started = time.monotonic()
+            self.assertFalse(le._probe_connectivity())
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_the_probe_goes_through_the_proxy_when_there_is_one(self):
+        with mock.patch.object(urllib.request, "getproxies", return_value={"https": "http://proxy.local:3128"}):
+            self.assertEqual(le._probe_target(), ("proxy.local", 3128))
+        with mock.patch.object(urllib.request, "getproxies", return_value={}):
+            self.assertEqual(le._probe_target(), ("translate.googleapis.com", 443))
+
+    def test_no_internet_lookup_answers_from_local_resources_without_requests(self):
+        use_lexicon(self)  # the probe fails
+        with NetworkTripwire() as net:
+            started = time.monotonic()
+            data = le.analyze_with_dictionaries("bank")
+        self.assertEqual(data["persian_source"], le.FA_SOURCE_WIKTIONARY)
+        self.assertEqual([a for a in net.attempts if a.startswith("requests")], [])
+        self.assertLess(time.monotonic() - started, 5)
 
 
 if __name__ == "__main__":

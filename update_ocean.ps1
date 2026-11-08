@@ -22,7 +22,7 @@ if (-not (Test-Path ".\ocean.ico")) {
     & ".\.venv\Scripts\python.exe" app.py --make-icon
 }
 
-& ".\.venv\Scripts\pyinstaller.exe" --noconfirm --noconsole --onedir --paths="." --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=kokoro_onnx --hidden-import=eng_to_ipa --hidden-import=nltk --hidden-import=ctranslate2 --hidden-import=sentencepiece --name "Ocean" --icon="ocean.ico" app.py
+& ".\.venv\Scripts\pyinstaller.exe" --noconfirm --noconsole --onedir --paths="." --hidden-import=lexical_engine --hidden-import=dictionary_sources --hidden-import=kokoro_onnx --hidden-import=eng_to_ipa --hidden-import=ctranslate2 --hidden-import=sentencepiece --name "Ocean" --icon="ocean.ico" app.py
 
 # User data (history, memory, settings) lives in %APPDATA%\Ocean, not in the build.
 foreach ($f in @("lexical_engine.py", "cefr_levels.json")) {
@@ -44,12 +44,6 @@ foreach ($vfile in @($voiceModel, "voices-v1.0.bin")) {
     }
 }
 
-$appdataNltk = Join-Path $env:APPDATA "nltk_data"
-if (Test-Path ".\nltk_data") {
-    Copy-Item -Path ".\nltk_data" -Destination ".\dist\Ocean\nltk_data" -Recurse -Force
-} elseif (Test-Path $appdataNltk) {
-    Copy-Item -Path $appdataNltk -Destination ".\dist\Ocean\nltk_data" -Recurse -Force
-}
 if (Test-Path "offline_mt_model") {
     Copy-Item -Path "offline_mt_model" -Destination ".\dist\Ocean\offline_mt_model" -Recurse -Force
 }

@@ -10,8 +10,8 @@ If a session needs them, attach them again.
 
 | Branch | Base | State |
 |---|---|---|
-| `upgrade-2` | `main` | Integration branch, about 60% of the spec. 3 tests fail only because WordNet is missing (gone once `upgrade/d-engine` is merged). |
-| `upgrade/d-engine` | `main` (**not** `upgrade-2`) | Engine rewrite, about 80%. All 514 tests pass on this branch. |
+| `upgrade-2` | `main` | Integration branch, about 70% of the spec. `upgrade/d-engine` is merged (2026-11-09); all 429 tests pass. |
+| `upgrade/d-engine` | `main` (**not** `upgrade-2`) | Engine rewrite, merged into `upgrade-2`. |
 | `upgrade/e-data` | `upgrade-2` | Idiom list (9,383 rows) and `tools/build_idioms.py`. Persian translations and the slang table are not done. |
 
 ### Done on `upgrade-2`
@@ -46,7 +46,7 @@ If a session needs them, attach them again.
 - **Importer:** `tools/build_lexicon_db.py` is updated.
 
 ### Not done yet
-1. **Merge `upgrade/d-engine` into `upgrade-2`.** It conflicts with the removals (see the pitfalls below).
+1. ~~Merge `upgrade/d-engine` into `upgrade-2`.~~ Done. Conflicts were README and three tests; the engine keeps `set_offline_only` as a hard switch, so `tests/test_offline_mode.py` stays.
 2. **Merge `upgrade/e-data` into `upgrade-2`.**
 3. **Match `ui/results_page.py` to the engine payload.**
    - It currently reads `common_expressions`, then `derived_terms`, then `morphology["common_expressions"]`.

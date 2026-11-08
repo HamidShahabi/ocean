@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time Linux setup: venv, Python deps, WordNet, Kokoro voice model, offline translator, Ocean's local
+# One-time Linux setup: venv, Python deps, Kokoro voice model, offline translator, Ocean's local
 # dictionary database, fonts.
 #   --urban FILE   also import an Urban Dictionary dump (CSV or JSON; see tools/build_lexicon_db.py)
 #   --with-slm     also install the optional local language model (llama-cpp-python + Qwen2.5-1.5B, ~1.1 GB;
@@ -19,11 +19,6 @@ done
 
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.lock
-
-# lexical_engine.py looks in ./nltk_data first. NLTK_DATA must name the target dir
-# or newer NLTK refuses to download there ("Unauthorized path").
-# WordNet 3.1 gives synonyms and antonyms; it needs the 3.0 data too, which the lemmatizer uses.
-NLTK_DATA="$PWD/nltk_data" .venv/bin/python -m nltk.downloader -d "$PWD/nltk_data" wordnet wordnet31 omw-1.4
 
 KOKORO_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 # int8 model (~88 MB); an existing full-size kokoro-v1.0.onnx is used as is and not replaced.
@@ -56,8 +51,14 @@ if [ ! -f ocean_lexicon.db ]; then
         get "https://downloads.tatoeba.org/exports/per_language/$f" "$dl/tatoeba/$(basename "$f")"
     done
     get https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2018/moses/en-fa.txt.zip "$dl/opensubtitles-en-fa.zip"
+    extra=()
+    # The bundled slang table and the pre-translated idioms, when they sit next to this script.
+    if [ -z "$URBAN" ] && [ -f ocean_slang.db ]; then extra+=(--slang-db ocean_slang.db); fi
+    for idioms in idioms_fa.tsv idioms_fa.jsonl; do
+        if [ -f "$idioms" ]; then extra+=(--idioms-fa "$idioms"); break; fi
+    done
     .venv/bin/python tools/build_lexicon_db.py --out ocean_lexicon.db --kaikki "$dl/kaikki.jsonl.gz" \
-        --tatoeba-dir "$dl/tatoeba" --opensubtitles "$dl/opensubtitles-en-fa.zip" ${URBAN:+--urban "$URBAN"}
+        --tatoeba-dir "$dl/tatoeba" --opensubtitles "$dl/opensubtitles-en-fa.zip" ${URBAN:+--urban "$URBAN"} ${extra[@]+"${extra[@]}"}
     rm -rf "$dl"
 fi
 

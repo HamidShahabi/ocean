@@ -3,25 +3,18 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 # lexical_engine creates its per-user data folder on import: keep tests away from the real one.
 _DATA = tempfile.mkdtemp()
 os.environ["XDG_DATA_HOME"] = _DATA
 os.environ["APPDATA"] = _DATA
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lexicon_fixture import use_lexicon  # noqa: E402
 import lexical_engine as le  # noqa: E402
 import word_levels  # noqa: E402
 
 BUNDLED = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cefr_levels.json")
-
-
-class FakeLemmatizer:
-    """Stands in for WordNet's lemmatizer, which the sandbox may not have data for."""
-    FORMS = {("walks", "v"): "walk", ("mice", "n"): "mouse"}
-
-    def lemmatize(self, word, pos="n"):
-        return self.FORMS.get((word, pos), word)
 
 
 class FrequencyBandTest(unittest.TestCase):
@@ -86,22 +79,19 @@ class BundledListTest(unittest.TestCase):
 
 
 class EngineLevelTest(unittest.TestCase):
-    def test_engine_looks_up_the_bundled_list_and_lemmatizes(self):
-        with mock.patch.object(le, "LEMMATIZER", FakeLemmatizer()):
-            self.assertEqual(le.lookup_cefr_level("bright"), "A1")
-            self.assertEqual(le.lookup_cefr_level("Mice"), "A1")    # mouse
-            self.assertEqual(le.lookup_cefr_level("walks"), "A1")   # walk
-            self.assertEqual(le.lookup_cefr_level("serendipity"), "")
-        with mock.patch.object(le, "LEMMATIZER", None):
-            self.assertEqual(le.lookup_cefr_level("walks"), "")     # no lemmatizer: only exact words
+    def test_engine_looks_up_the_bundled_list_and_takes_the_lemmas_level(self):
+        use_lexicon(self)
+        self.assertEqual(le.lookup_cefr_level("bright"), "A1")
+        self.assertEqual(le.lookup_cefr_level("Ran"), "A1")      # run: Wiktionary's lemma
+        self.assertEqual(le.lookup_cefr_level("banks"), "A1")    # bank
+        self.assertEqual(le.lookup_cefr_level("possessing"), "B1")  # possess: Wiktionary lists the form
+        self.assertEqual(le.lookup_cefr_level("dialling"), "B1")  # dial, by a suffix rule the dictionary confirms
+        self.assertEqual(le.lookup_cefr_level("serendipity"), "")
 
-    def test_missing_wordnet_data_does_not_break_the_level(self):
-        class NoData:
-            def lemmatize(self, word, pos="n"):
-                raise LookupError("wordnet not found")
-        with mock.patch.object(le, "LEMMATIZER", NoData()), self.assertLogs("ocean", level="WARNING"):
-            self.assertEqual(le.lookup_cefr_level("bright"), "A1")
-            self.assertEqual(le.lookup_cefr_level("walks"), "")
+    def test_without_a_dictionary_only_exact_words_have_a_level(self):
+        use_lexicon(self, None)
+        self.assertEqual(le.lookup_cefr_level("bright"), "A1")
+        self.assertEqual(le.lookup_cefr_level("ran"), "")
 
     def test_bundled_file_sits_where_the_engine_looks(self):
         self.assertEqual(os.path.abspath(le.CEFR_LEVELS_FILE), BUNDLED)

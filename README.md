@@ -83,15 +83,20 @@ The speaker button next to a word, phrase or example sentence reads it aloud, wi
 
 Every source is on your computer (see [Dictionary data](#dictionary-data)), so a word's entry appears at once. Persian that is still being translated shows as "…" for a few seconds, then fills in.
 
-- **Definitions** come from Wiktionary, by part of speech, with usage examples, collocations, derived terms and IPA. An inflected form ("ran", "banks") shows its base word's entry. Words Wiktionary lacks fall back to WordNet.
-- **Synonyms and antonyms** come from WordNet 3.1, grouped under the sense they belong to, so the money "bank" and the river "bank" get separate groups.
-- **Slang** comes from Urban Dictionary, shown as a "Slang" sense (only if you imported it).
-- **Example sentences** with human Persian translations come from Tatoeba and OpenSubtitles. Ocean never makes up an example: a sense without a real one shows none.
+- **Definitions** come from Wiktionary, by part of speech, and only the few that matter: one or two senses (three at most, when a second part of speech is common), the most common first. Specialist senses (mathematics, linguistics, anatomy, law, religion...), archaic, obsolete, rare and historical ones, regional and Internet slang labels, and bare names ("A surname.") are left out while an ordinary sense exists, and long parenthetical asides are cut. An inflected form ("ran", "banks") shows its base word's entry.
+- **Example sentences** come from the OpenSubtitles film and TV dialogue first (short, natural, complete sentences with their human Persian translation: no fragments, lyrics, speaker tags or lines over 16 words), then Wiktionary's own usage examples, then Tatoeba. Text from old books that Wiktionary quotes (long-s OCR damage such as "poffeft", "[…]", verse breaks, undated quotations) is never used as an example and never machine-translated. Ocean never makes up an example: a sense without a real one shows none.
+- **IPA** comes from Wiktionary (American first), otherwise from the built-in pronunciation engine, always in one notation: "r" (never "ɹ"), "g", "tʃ"/"dʒ" without a tie bar, "ɜr"/"ər" for the r-coloured vowels, no length marks and no syllable dots; stress marks stay.
+- **Synonyms and antonyms** come from Wiktionary only, for the senses actually shown, everyday words only (nothing Wiktionary labels archaic, rare or dated, and nothing that does not occur in film and TV subtitles), at most five of each, most common first. A word with none shows none: nothing is filled in.
+- **Forms, Roots and Alternatives:** the base word, inflected forms (plural, past, participles...), alternative spellings, relatives of the word family, and the **common expressions** built on the word (Wiktionary's derived terms and collocations, kept only when people say them in the subtitles, at most eight, "cis privilege", "cis-privilege" and "cisprivilege" counting once).
+- **Idioms and phrases** are looked up as a whole first ("no bed of roses"); if Wiktionary has no entry for exactly that, the phrase is matched with neutral pronouns (it, someone, one's, your...), determiners and negations (a, the, no, not) and inflections ignored ("Dial it down" opens "dial down"; "bring him to heel" opens "bring someone to heel"). A phrase that matches an entry is never translated word by word.
+- **Slang** comes from the bundled slang table, shown as a "Slang" sense only when Wiktionary has nothing for the word or phrase, or when the slang is the strong, dominant use of a rare word: ordinary words show no slang.
 - **The Persian translation** is tried in this order:
   1. Your own edits.
-  2. Ocean's database. A word takes Wiktionary's translation of its main part of speech, one per sense for the first two senses; a phrase or sentence found whole in Tatoeba or OpenSubtitles takes its human translation.
-  3. Google Translate, when you are online.
-  4. Offline: the optional local language model for the looked-up phrase or sentence, if installed (see [Offline language model](#offline-language-model)), then the NLLB translator.
+  2. A pre-translated idiom (the idiom table in Ocean's database), or a phrase or sentence found whole in Tatoeba or OpenSubtitles: human translations, shown at once; no machine translator is ever asked for these.
+  3. Google Translate's answer, if you have looked the word up before (every answer is kept for good in `translation_cache.db`, so the same word is instant and works offline).
+  4. Google Translate, when you are online.
+  5. Wiktionary's Persian equivalents for a word, only those that are everyday words (the word occurs at least ten times in the Persian side of the subtitles), one per sense for the first two senses.
+  6. Offline: the optional local language model for an idiom or sentence, if installed (see [Offline language model](#offline-language-model)), then the NLLB translator. Whatever they produce is kept in the cache too, and replaced by Google's translation the next time you are online (or when you press **Refresh**).
 
 ## History
 
@@ -143,7 +148,11 @@ Saved lookups are fetched again when they are older than the period set in **Men
 
 ### Working offline
 
-Ocean's dictionary works without internet, and it switches to its local data by itself when there is no connection: no setting is needed. Online, the only network use is Google Translate, for Persian that Ocean's database doesn't have. Without internet that falls back to the NLLB-200 model in `offline_mt_model\` (downloaded by the setup script), so expect lower-quality Persian for words and sentences that Ocean's database doesn't translate. The model and WordNet are loaded in the background right after startup, so the first lookup doesn't wait for them. The Kokoro voice (and the system voice fallback) already runs on your computer.
+Ocean's dictionary works without internet, and it notices by itself whether there is any: a quick connection check (one second at most, remembered for a minute) before it uses Google Translate. Without a connection every lookup goes straight to the local resources, with no waiting, and when the connection is back Google is used again.
+
+- Offline, lookups use your history, your own entries and fixes, Ocean's database, every translation Ocean has ever fetched or generated (kept in `translation_cache.db`), the offline language model (if installed) and the NLLB-200 translator in `offline_mt_model\` (downloaded by the setup script, loaded in the background at startup so the first lookup doesn't wait). The Kokoro voice (and the system voice fallback) runs on your computer as well.
+- Offline translations are machine translations of words and sentences that neither the database nor the cache has; expect lower quality for those. They are replaced by Google's translation the next time you look the word up online, or when you press **Refresh**.
+- Suggestions as you type come from your history, your entries and Ocean's database.
 
 ### Offline language model
 
@@ -159,19 +168,19 @@ It also peaked at 1.8 GB of RAM. Qwen3-1.7B and Gemma-3-1B, the other models of 
 
 ## Dictionary data
 
-Ocean's dictionary is one file, `ocean_lexicon.db` (~250 MB), next to the app. The setup scripts build it from these downloads (~750 MB, deleted afterwards; the import takes about five minutes):
+Ocean's dictionary is one file, `ocean_lexicon.db` (about 600 MB), next to the app. The setup scripts build it from these downloads (~750 MB, deleted afterwards; the import takes about ten minutes):
 
 | Dataset | What Ocean uses | Size in the database |
 |---|---|---|
-| [Kaikki.org](https://kaikki.org/dictionary/English/) English extract of Wiktionary | Definitions by part of speech, examples, collocations, derived terms, IPA, inflected forms, English–Persian translations | ~780,000 entries |
-| [Tatoeba](https://tatoeba.org/) English–Persian sentence pairs | Example sentences and translations | ~8,500 pairs |
-| [OPUS OpenSubtitles](https://opus.nlpl.eu/OpenSubtitles/en&fa/v2018/OpenSubtitles) v2018 English–Persian | Translations of everyday phrases and lines (kept when at least two subtitle lines agree on the same rendering; up to 12 words), example sentences, word frequencies | ~64,000 pairs, ~180,000 word frequencies |
-| [WordNet 3.1](https://wordnet.princeton.edu/) (NLTK data, in `nltk_data/`) | Synonyms and antonyms by sense | — |
-| Urban Dictionary (optional) | Slang senses | — |
+| [Kaikki.org](https://kaikki.org/dictionary/English/) English extract of Wiktionary | Definitions by part of speech with their usage labels and topics, examples, synonyms and antonyms, forms, alternative spellings, collocations, derived terms, IPA, idioms and phrases, English–Persian translations | ~800,000 entries |
+| [Tatoeba](https://tatoeba.org/) English–Persian sentence pairs | Example sentences and translations (the last choice) | ~8,500 pairs |
+| [OPUS OpenSubtitles](https://opus.nlpl.eu/OpenSubtitles/en&fa/v2018/OpenSubtitles) v2018 English–Persian | Example sentences (complete, natural lines of 3 to 16 words with a verb and no subtitle artefacts; the best-agreed million), translations of everyday phrases (kept when at least two subtitle lines agree on the rendering; up to 12 words), word frequencies in English and in Persian | ~1,000,000 pairs, ~180,000 English and ~140,000 Persian word frequencies |
+| Slang table (optional) | Slang senses: a compact SQLite file of the best-voted Urban Dictionary entries (`--slang-db`), or your own dump (`--urban`) | — |
+| Pre-translated idioms (optional) | Persian for English idioms and proverbs, checked before any machine translation (`--idioms-fa`) | — |
 
-Urban Dictionary publishes no official dump, so it is not downloaded. To add slang, get a dump with word, definition and vote columns (for example the "Urban Dictionary Words and Definitions" CSV on Kaggle) and pass it to the setup script: `./setup_linux.sh --urban FILE` or `setup_windows.ps1 -Urban FILE`. Only entries with at least twice as many upvotes as downvotes (and at least one upvote) are imported, at most three per word.
+The slang table and the idioms are built separately and handed to the importer: `tools/build_lexicon_db.py --slang-db ocean_slang.db --idioms-fa idioms_fa.tsv ...` (the setup scripts pass `ocean_slang.db` and `idioms_fa.tsv` or `idioms_fa.jsonl` when they sit next to the script). The slang file needs a `slang` table with word, definition, example and up/down votes (or a thumbs ratio) columns. The idiom file is TSV (English phrase, Persian[, source]) or JSON lines (`{"phrase", "fa", "source"}`). To add slang from a raw Urban Dictionary dump instead, get one with word, definition and vote columns (for example the "Urban Dictionary Words and Definitions" CSV on Kaggle) and pass it to the setup script: `./setup_linux.sh --urban FILE` or `setup_windows.ps1 -Urban FILE`. Only entries with at least twice as many upvotes as downvotes (and at least one upvote) are imported, at most three per word.
 
-To rebuild the database (for example with a newer Kaikki extract, or to add the Urban Dictionary dump later), delete `ocean_lexicon.db` and run the setup script again, or run `tools/build_lexicon_db.py` yourself (`--help` lists the options). The file is replaced only when a build completes. Without the database Ocean still works, with WordNet definitions and machine translation only.
+To rebuild the database (for example with a newer Kaikki extract), delete `ocean_lexicon.db` and run the setup script again, or run `tools/build_lexicon_db.py` yourself (`--help` lists the options). The file is replaced only when a build completes. A database built by an older version still works (its definitions and examples are filtered when read), but it lacks the newer data: rebuild it to get synonyms, forms, idioms and Persian word frequencies. Without the database Ocean still works, with the IPA engine and machine translation only.
 
 ## Your data
 
@@ -193,7 +202,6 @@ The dictionary database (see [Dictionary data](#dictionary-data)) redistributes:
 - **Wiktionary** content via [Kaikki.org](https://kaikki.org/) (Tatu Ylonen, "Wiktextract: Wiktionary as Machine-Readable Structured Data", LREC 2022), licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) and GFDL.
 - **Tatoeba** sentences, licensed [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/); © the Tatoeba contributors.
 - **OpenSubtitles** via OPUS: P. Lison and J. Tiedemann, "OpenSubtitles2016: Extracting Large Parallel Corpora from Movie and TV Subtitles", LREC 2016 (<http://www.opensubtitles.org/>), and J. Tiedemann, "Parallel Data, Tools and Interfaces in OPUS", LREC 2012.
-- **WordNet 3.1**, Princeton University, under the [WordNet License](https://wordnet.princeton.edu/license-and-commercial-use).
 - **Urban Dictionary** definitions, only when you import a dump yourself; check the terms of the dump you use.
 
 The level badges use `cefr_levels.json` (shipped next to `ocean_lexicon.db` in builds):
@@ -211,7 +219,7 @@ Run the tests (the lookup tests build a small sample database of their own inste
 .venv/bin/python -m unittest discover -s tests
 ```
 
-`app.py` only starts the app. The lookup engine is `lexical_engine.py` (morphology, IPA, the translation tiers); `dictionary_sources/` has one module per dataset; `lexicon_db.py` reads `ocean_lexicon.db`, which `tools/build_lexicon_db.py` builds; `offline_slm.py` wraps the optional language model; `ui/` holds one module per page. Errors from every part, including uncaught ones, go to `ocean.log` in your user data folder.
+`app.py` only starts the app. The lookup engine is `lexical_engine.py` (morphology, IPA, the translation tiers, connectivity); `lexicon_text.py` holds the text rules (example and definition filters, idiom keys, IPA notation) shared with the import tool; `translation_cache.py` is the permanent translation cache; `dictionary_sources/` has one module per dataset; `lexicon_db.py` reads `ocean_lexicon.db`, which `tools/build_lexicon_db.py` builds; `offline_slm.py` wraps the optional language model; `ui/` holds one module per page. Errors from every part, including uncaught ones, go to `ocean.log` in your user data folder.
 
 ### Dependencies
 

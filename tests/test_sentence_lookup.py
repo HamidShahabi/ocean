@@ -27,8 +27,6 @@ class SentenceLookupTest(unittest.TestCase):
         for p in (
             mock.patch.object(le, "translate_with_source", side_effect=fake_translate),
             mock.patch.object(le, "sentence_to_ipa", return_value=""),
-            mock.patch.object(le, "wn", None),  # WordNet may be missing and is not what is under test
-            mock.patch.object(le, "LEMMATIZER", None),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -50,7 +48,7 @@ class SentenceLookupTest(unittest.TestCase):
     def test_inflected_words_are_explained_by_their_lemma(self):
         result, _ = self._lookup("They ran to the banks of the river.")
         first = result["sentence_breakdown"][0]
-        self.assertEqual((first["term"], first["def"]), ("ran", "To move swiftly on foot."))  # run's sense
+        self.assertEqual((first["term"], first["def"]), ("run", "To move swiftly on foot."))  # the lemma is explained
 
 
 if __name__ == "__main__":

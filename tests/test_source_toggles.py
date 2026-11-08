@@ -49,7 +49,7 @@ class RemovedSettingsTest(unittest.TestCase):
         for name in ds.REGISTRY.names():
             ds.REGISTRY.set_enabled(name, False)
         self.assertFalse(ds.REGISTRY.any_enabled())
-        ds.REGISTRY.set_enabled("wordnet", True)
+        ds.REGISTRY.set_enabled("corpora", True)
         self.assertTrue(ds.REGISTRY.any_enabled())
 
 
@@ -70,8 +70,6 @@ class DisabledSourcesAreNeverReadTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         for p in (
-            mock.patch.object(le, "wn", None),
-            mock.patch.object(le, "LEMMATIZER", None),
             mock.patch.object(le, "fetch_persian_word_meaning", lambda t, is_idiom=False: ("FA:" + t, "")),
             mock.patch.object(le, "translate_batch_fast", lambda sentences, short_terms: {s: "fa " + s for s in list(sentences) + list(short_terms)}),
         ):
@@ -94,7 +92,7 @@ class DisabledSourcesAreNeverReadTest(unittest.TestCase):
 
     def test_every_enabled_source_is_read(self):
         self.lookup_all_kinds()
-        self.assertEqual(set(self.fetched), {"kaikki", "urban_dictionary", "corpora"})  # WordNet is absent here
+        self.assertEqual(set(self.fetched), {"kaikki", "urban_dictionary", "corpora"})
 
     def test_nothing_is_read_with_every_source_disabled(self):
         for name in ds.REGISTRY.names():
