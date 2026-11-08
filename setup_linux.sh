@@ -54,7 +54,7 @@ if [ ! -f ocean_lexicon.db ]; then
     extra=()
     # The bundled slang table and the pre-translated idioms, when they sit next to this script.
     if [ -z "$URBAN" ] && [ -f ocean_slang.db ]; then extra+=(--slang-db ocean_slang.db); fi
-    for idioms in idioms_fa.tsv idioms_fa.jsonl; do
+    for idioms in data/idioms_fa.tsv.gz idioms_fa.tsv idioms_fa.jsonl; do
         if [ -f "$idioms" ]; then extra+=(--idioms-fa "$idioms"); break; fi
     done
     .venv/bin/python tools/build_lexicon_db.py --out ocean_lexicon.db --kaikki "$dl/kaikki.jsonl.gz" \

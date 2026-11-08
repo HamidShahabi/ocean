@@ -79,6 +79,14 @@ class TierOrderTest(unittest.TestCase):
         self.assertEqual(le.translate_with_source("dial it down")[1], le.FA_SOURCE_IDIOMS)
         self.google.assert_not_called()
 
+    def test_an_idiom_with_persian_never_reaches_a_machine_translator(self):
+        le.set_offline_only(True)
+        for use_slm in (False, True):
+            self.assertEqual(le.translate_with_source("dial it down", use_slm=use_slm), ("آرام تر باش", le.FA_SOURCE_IDIOMS))
+        self.assertEqual(le.fetch_persian_word_meaning("dial it down", is_idiom=True), ("آرام تر باش", le.FA_SOURCE_IDIOMS))
+        for machine in (self.google, self.slm, self.nllb, self.nllb_batch):
+            machine.assert_not_called()
+
     def test_online_google_comes_before_wiktionary_for_a_word_and_is_cached(self):
         self.assertEqual(le.translate_with_source("bank", is_short=True), ("گوگل", le.FA_SOURCE_GOOGLE))
         self.google.reset_mock()

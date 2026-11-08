@@ -471,8 +471,10 @@ CREATE INDEX idioms_fa_norm ON idioms_fa (norm_key);
 
 
 def read_idioms_fa(path: str) -> Iterator[Dict[str, str]]:
-    """Rows of an idiom dataset: JSON lines ({"phrase", "fa", "source"}), or TSV (phrase, Persian[, source]) with
-    an optional header line. Plain or .gz."""
+    """Rows of an idiom dataset: JSON lines ({"phrase", "fa", "source"}), or TSV, plain or .gz. A TSV with a header
+    line (tools/build_idioms.py's idioms_fa.tsv.gz: phrase, key, ..., fa, fa_source) is read by column name; one
+    without is read as phrase, Persian[, source]."""
+    columns: Optional[Dict[str, int]] = None
     with _open_text(path) as f:
         for line in f:
             line = line.strip("\n")
@@ -487,7 +489,13 @@ def read_idioms_fa(path: str) -> Iterator[Dict[str, str]]:
                        "source": str(row.get("source") or "")}
                 continue
             parts = line.split("\t")
-            if len(parts) >= 2 and parts[0].strip().lower() != "phrase":
+            if parts[0].strip().lower() == "phrase":
+                columns = {name.strip().lower(): i for i, name in enumerate(parts)}
+                continue
+            if columns and "fa" in columns:
+                get = lambda name: parts[columns[name]] if name in columns and columns[name] < len(parts) else ""  # noqa: E731
+                yield {"phrase": parts[0], "fa": get("fa"), "source": get("fa_source") or get("source")}
+            elif len(parts) >= 2:
                 yield {"phrase": parts[0], "fa": parts[1], "source": parts[2] if len(parts) > 2 else ""}
 
 

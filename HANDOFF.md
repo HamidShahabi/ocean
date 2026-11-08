@@ -10,7 +10,7 @@ If a session needs them, attach them again.
 
 | Branch | Base | State |
 |---|---|---|
-| `upgrade-2` | `main` | Integration branch, about 70% of the spec. `upgrade/d-engine` is merged (2026-11-09); all 433 tests pass. |
+| `upgrade-2` | `main` | Integration branch, about 70% of the spec. `upgrade/d-engine` is merged (2026-11-09); all 435 tests pass. |
 | `upgrade/d-engine` | `main` (**not** `upgrade-2`) | Engine rewrite, merged into `upgrade-2`. |
 | `upgrade/e-data` | `upgrade-2` | Merged into `upgrade-2`. Idiom list (9,383 rows) and `tools/build_idioms.py`. Persian translations and the slang table are not done. |
 
@@ -50,10 +50,11 @@ If a session needs them, attach them again.
 2. ~~Merge `upgrade/e-data` into `upgrade-2`.~~ Done (only HANDOFF.md conflicted).
 3. ~~Match `ui/results_page.py` to the engine payload.~~ Done: reads `common_expressions` only, shows `forms`, `alternatives` and the `phrase_match` note, IPA labels go through `theme.style_ipa_label`. The engine still sends `derived_terms` as an alias nothing reads; drop it in item 8.
 4. ~~Match the Sources page to the engine's real routing.~~ Done: dictionary sources in `REGISTRY` order, then idioms, cache, Google, optional local model, NLLB; `tests/test_pages_ui.py` checks the order.
-5. **Persian for the idiom list:**
-   - Write `data/idioms_fa_parts/*.tsv` (columns `key<TAB>fa`), natural Persian and not word-for-word, labelled `fa_source=claude`.
-   - Then run `tools/build_idioms.py merge-fa`.
-   - The engine reads `idioms_fa` first and must never call NLLB for an idiom that has Persian.
+5. **Persian for the idiom list (in progress: 500 of 9,382 done).**
+   - Done: `data/idioms_fa_parts/part-01.tsv` covers rows 1–500 of `data/idioms_en.tsv.gz`; `data/idioms_fa.tsv.gz` is rebuilt with `tools/build_idioms.py merge-fa`.
+   - Next: `part-02.tsv` = the next 500 rows without Persian (rows 501–1000), same format, then re-run `merge-fa --idioms data/idioms_en.tsv.gz --fa-dir data/idioms_fa_parts --out data/idioms_fa.tsv.gz`.
+   - `tools/build_lexicon_db.py` reads the merged file by column name (it used to take the key column as Persian), and both setup scripts pick up `data/idioms_fa.tsv.gz`. An existing `ocean_lexicon.db` has no `idioms_fa` until it is rebuilt.
+   - The engine reads `idioms_fa` first and never calls NLLB or the local model for an idiom that has Persian (`tests/test_translation_tiers.py`).
 6. **Urban Dictionary slang table:**
    - The top 10–15k entries in a small SQLite table, bundled the same way as the lexicon.
    - Read-only, with no network at runtime.

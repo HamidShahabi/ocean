@@ -61,7 +61,7 @@ if (-not (Test-Path "ocean_lexicon.db")) {
     if ($Urban) { $buildArgs += @("--urban", (Resolve-Path $Urban).Path) }
     # The bundled slang table and the pre-translated idioms, when they sit next to this script.
     if ((-not $Urban) -and (Test-Path "ocean_slang.db")) { $buildArgs += @("--slang-db", "ocean_slang.db") }
-    foreach ($idioms in @("idioms_fa.tsv", "idioms_fa.jsonl")) {
+    foreach ($idioms in @("data\idioms_fa.tsv.gz", "idioms_fa.tsv", "idioms_fa.jsonl")) {
         if (Test-Path $idioms) { $buildArgs += @("--idioms-fa", $idioms); break }
     }
     & .\.venv\Scripts\python.exe @buildArgs

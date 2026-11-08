@@ -282,6 +282,22 @@ class BuiltDatabaseTest(unittest.TestCase):
             self.assertEqual(build.build(out, idioms_fa=jsonl), {"idioms_fa": 1})
         self.assertEqual(lexicon_db.LexiconDB(out).idiom_fa("under the weather"), {"phrase": "Under the weather", "fa": "کسل", "source": "x"})
 
+    def test_the_idiom_list_from_build_idioms_is_read_by_column_name(self):
+        # tools/build_idioms.py merge-fa writes: phrase, key, base_key, meaning_en, example_en, fa, fa_source.
+        folder = tempfile.mkdtemp()
+        tsv = os.path.join(folder, "idioms_fa.tsv")
+        with open(tsv, "w", encoding="utf-8") as f:
+            f.write("phrase\tkey\tbase_key\tmeaning_en\texample_en\tfa\tfa_source\n")
+            f.write("under the weather\tunder the weather\tunder weather\tIll\tI feel under the weather.\tکسل\tclaude\n")
+            f.write("over the moon\tover the moon\tover moon\tVery happy\t\t\t\n")  # no Persian yet
+        self.assertEqual(list(build.read_idioms_fa(tsv))[0], {"phrase": "under the weather", "fa": "کسل", "source": "claude"})
+        out = os.path.join(folder, "db.sqlite")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(build.build(out, idioms_fa=tsv), {"idioms_fa": 1})
+        db = lexicon_db.LexiconDB(out)
+        self.assertEqual(db.idiom_fa("under the weather"), {"phrase": "under the weather", "fa": "کسل", "source": "claude"})
+        self.assertIsNone(db.idiom_fa("over the moon"))
+
     def test_suggestions_and_spelling(self):
         self.assertEqual(self.db.suggestions("ba"), ["bank", "Banks"])
         self.assertEqual(self.db.suggestions("b"), [])
