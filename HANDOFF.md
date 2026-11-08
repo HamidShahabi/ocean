@@ -50,9 +50,9 @@ If a session needs them, attach them again.
 2. ~~Merge `upgrade/e-data` into `upgrade-2`.~~ Done (only HANDOFF.md conflicted).
 3. ~~Match `ui/results_page.py` to the engine payload.~~ Done: reads `common_expressions` only, shows `forms`, `alternatives` and the `phrase_match` note, IPA labels go through `theme.style_ipa_label`. The engine still sends `derived_terms` as an alias nothing reads; drop it in item 8.
 4. ~~Match the Sources page to the engine's real routing.~~ Done: dictionary sources in `REGISTRY` order, then idioms, cache, Google, optional local model, NLLB; `tests/test_pages_ui.py` checks the order.
-5. **Persian for the idiom list (in progress: 1,000 of 9,382 done).**
-   - Done: `part-01.tsv` and `part-02.tsv` in `data/idioms_fa_parts/` cover rows 1–1000 of `data/idioms_en.tsv.gz`; `data/idioms_fa.tsv.gz` is rebuilt with `tools/build_idioms.py merge-fa`.
-   - Next: `part-03.tsv` = the next 500 rows without Persian (rows 1001–1500), same format, then re-run `merge-fa --idioms data/idioms_en.tsv.gz --fa-dir data/idioms_fa_parts --out data/idioms_fa.tsv.gz`.
+5. **Persian for the idiom list (in progress: 1,500 of 9,382 done).**
+   - Done: `part-01.tsv` to `part-03.tsv` in `data/idioms_fa_parts/` cover rows 1–1500 of `data/idioms_en.tsv.gz`; `data/idioms_fa.tsv.gz` is rebuilt with `tools/build_idioms.py merge-fa`.
+   - Next: `part-04.tsv` = the next 500 rows without Persian (rows 1501–2000), same format, then re-run `merge-fa --idioms data/idioms_en.tsv.gz --fa-dir data/idioms_fa_parts --out data/idioms_fa.tsv.gz`.
    - `tools/build_lexicon_db.py` reads the merged file by column name (it used to take the key column as Persian), and both setup scripts pick up `data/idioms_fa.tsv.gz`. An existing `ocean_lexicon.db` has no `idioms_fa` until it is rebuilt.
    - The engine reads `idioms_fa` first and never calls NLLB or the local model for an idiom that has Persian (`tests/test_translation_tiers.py`).
 6. **Urban Dictionary slang table:**
