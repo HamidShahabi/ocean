@@ -10,9 +10,9 @@ If a session needs them, attach them again.
 
 | Branch | Base | State |
 |---|---|---|
-| `upgrade-2` | `main` | Integration branch, about 70% of the spec. `upgrade/d-engine` is merged (2026-11-09); all 432 tests pass. |
+| `upgrade-2` | `main` | Integration branch, about 70% of the spec. `upgrade/d-engine` is merged (2026-11-09); all 433 tests pass. |
 | `upgrade/d-engine` | `main` (**not** `upgrade-2`) | Engine rewrite, merged into `upgrade-2`. |
-| `upgrade/e-data` | `upgrade-2` | Idiom list (9,383 rows) and `tools/build_idioms.py`. Persian translations and the slang table are not done. |
+| `upgrade/e-data` | `upgrade-2` | Merged into `upgrade-2`. Idiom list (9,383 rows) and `tools/build_idioms.py`. Persian translations and the slang table are not done. |
 
 ### Done on `upgrade-2`
 - **Removed** Reader, Quiz, Review, Pronounce, Teach Ocean, Anki export, the lookup counter, offline-only mode, the source toggles and word highlighting.
@@ -47,13 +47,9 @@ If a session needs them, attach them again.
 
 ### Not done yet
 1. ~~Merge `upgrade/d-engine` into `upgrade-2`.~~ Done. Conflicts were README and three tests; the engine keeps `set_offline_only` as a hard switch, so `tests/test_offline_mode.py` stays.
-2. **Merge `upgrade/e-data` into `upgrade-2`.**
+2. ~~Merge `upgrade/e-data` into `upgrade-2`.~~ Done (only HANDOFF.md conflicted).
 3. ~~Match `ui/results_page.py` to the engine payload.~~ Done: reads `common_expressions` only, shows `forms`, `alternatives` and the `phrase_match` note, IPA labels go through `theme.style_ipa_label`. The engine still sends `derived_terms` as an alias nothing reads; drop it in item 8.
-4. **Match the Sources page** list and order to the engine's real routing:
-   - definitions: Kaikki;
-   - examples: OpenSubtitles first, then Tatoeba;
-   - Persian: cache, then Google, then NLLB/LLM;
-   - slang: Urban Dictionary.
+4. ~~Match the Sources page to the engine's real routing.~~ Done: dictionary sources in `REGISTRY` order, then idioms, cache, Google, optional local model, NLLB; `tests/test_pages_ui.py` checks the order.
 5. **Persian for the idiom list:**
    - Write `data/idioms_fa_parts/*.tsv` (columns `key<TAB>fa`), natural Persian and not word-for-word, labelled `fa_source=claude`.
    - Then run `tools/build_idioms.py merge-fa`.

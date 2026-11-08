@@ -20,6 +20,7 @@ import report_export  # noqa: E402
 from ui import theme  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_REPORTS, PAGE_SOURCES  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
+import dictionary_sources  # noqa: E402
 from ui.sources_page import SOURCES  # noqa: E402
 from test_ui_smoke import FakeWorker, IDIOM, SENTENCE, WORD, card_texts  # noqa: E402
 
@@ -154,8 +155,24 @@ class PagesUiTest(unittest.TestCase):
         self.assertEqual(numbers, [str(i) for i in range(1, len(SOURCES) + 1)])
         self.assertFalse(any("WordNet" in s["name"] or "WordNet" in s["role"] for s in SOURCES))
         text = " ".join(lbl.text() for lbl in page.findChildren(QLabel))
-        for needle in ("Wiktionary", "OpenSubtitles", "Tatoeba", "Urban Dictionary", "Idioms", "Google Translate", "NLLB"):
+        for needle in ("Wiktionary", "OpenSubtitles", "Tatoeba", "Urban Dictionary", "Idioms", "Translation cache", "Google Translate", "NLLB"):
             self.assertIn(needle, text)
+
+    def test_sources_are_listed_in_the_engines_order(self):
+        names = [s["name"] for s in SOURCES]
+        position = {key: next(i for i, n in enumerate(names) if key in n) for key in (
+            "Idioms", "Wiktionary", "Urban", "OpenSubtitles", "Tatoeba", "cache", "Google", "language model", "NLLB")}
+        # The dictionary sources follow the registry's merge order (Wiktionary, slang, example sentences)...
+        registry = [s.name for s in dictionary_sources.REGISTRY.all()]
+        self.assertEqual(registry, ["kaikki", "urban_dictionary", "corpora"])
+        self.assertLess(position["Wiktionary"], position["Urban"])
+        self.assertLess(position["Urban"], position["OpenSubtitles"])
+        self.assertLess(position["OpenSubtitles"], position["Tatoeba"])
+        # ...and Persian goes idioms, cache, Google, then the offline models (translate_with_source).
+        self.assertLess(position["Idioms"], position["Wiktionary"])
+        self.assertLess(position["cache"], position["Google"])
+        self.assertLess(position["Google"], position["language model"])
+        self.assertLess(position["language model"], position["NLLB"])
 
     # --- result page (005) ---
     def test_section_titles_and_subsections(self):
