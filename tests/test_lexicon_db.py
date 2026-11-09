@@ -326,6 +326,30 @@ class BuildDriverTest(unittest.TestCase):
         self.assertFalse(db.has("slang"))
         self.assertEqual(db.entries("bank"), [])  # a dataset left out is simply absent
 
+    # Every (table, column, extra condition) that lexicon_db.py looks rows up by.
+    LOOKUPS = [
+        ("entries", "word_key", ""), ("entries", "phrase_key", " AND phrase_key != ''"),
+        ("form_of", "form_key", ""), ("form_of", "lemma", ""),
+        ("fa_translations", "word_key", ""), ("fa_translations", "fa_key", ""),
+        ("slang", "word_key", ""),
+        ("idioms_fa", "phrase_key", ""), ("idioms_fa", "norm_key", ""),
+        ("parallel", "en_key", ""),
+        ("word_freq", "word_key", ""), ("fa_word_freq", "fa_key", ""),
+    ]
+
+    def test_the_built_database_indexes_every_lookup_column_and_is_analyzed(self):
+        conn = sqlite3.connect(fixture_db())
+        self.addCleanup(conn.close)
+        for table, column, extra in self.LOOKUPS:
+            plan = " ".join(r[3] for r in conn.execute(
+                f"EXPLAIN QUERY PLAN SELECT * FROM {table} WHERE {column} = ?{extra}", ("x",)))
+            self.assertIn("USING", plan, f"{table}.{column} is looked up by a full scan: {plan}")
+            self.assertNotIn("SCAN", plan, f"{table}.{column}: {plan}")
+        self.assertIn("parallel_fts", {r[0] for r in conn.execute("SELECT name FROM sqlite_master")})
+        analyzed = {r[0] for r in conn.execute("SELECT DISTINCT tbl FROM sqlite_stat1")}  # ANALYZE ran
+        self.assertTrue({"entries", "form_of", "fa_translations", "slang", "idioms_fa", "parallel"} <= analyzed, analyzed)
+        self.assertEqual(conn.execute("PRAGMA freelist_count").fetchone()[0], 0)  # and VACUUM ran
+
     def test_missing_or_broken_database_answers_empty(self):
         missing = lexicon_db.LexiconDB(os.path.join(tempfile.mkdtemp(), "none.db"))
         self.assertFalse(missing.available())

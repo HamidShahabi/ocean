@@ -582,6 +582,7 @@ def build(out: str, kaikki: Optional[str] = None, tatoeba_dir: Optional[str] = N
         db.executemany("INSERT INTO meta VALUES (?, ?)", [(k, str(v)) for k, v in stats.items()]
                        + [("built_at", time.strftime("%Y-%m-%d")), ("schema_version", SCHEMA_VERSION)])
         db.commit()
+        db.execute("ANALYZE")  # the planner's statistics ship with the file; LexiconDB opens it read-only and cannot make them
         db.execute("VACUUM")
     finally:
         db.close()

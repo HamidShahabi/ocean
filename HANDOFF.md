@@ -59,9 +59,10 @@ If a session needs them, attach them again.
    - The top 10–15k entries in a small SQLite table, bundled the same way as the lexicon.
    - Read-only, with no network at runtime.
    - `api.urbandictionary.com` was reachable from the cloud environment.
+   - **Blocked (2026-11-09):** `api.urbandictionary.com` answers from here, but `thumbs_up` and `thumbs_down` are 0 for every definition, so the API cannot rank entries or drop jokes by votes, and there is no "top" endpoint. A real dump with votes (as of May 2016, no examples column) exists as `opensporks/urban_dict_word_defs` on Hugging Face (`urbandict-word-defs.csv`, 538 MB, a mirror of the Kaggle "Urban Dictionary Words and Definitions" set). Nothing is built yet; it needs a decision on downloading that file.
 7. **Startup:** defer slow imports and preloads in `app.py`.
 8. **Remove leftover dead code:** `record_taught_entry`, `REGISTRY.set_enabled`, `tests/test_source_toggles.py`, and anything still pointing at removed pages.
-9. **Database tidy-up:** `VACUUM`/`ANALYZE` after the build, and check indexes on the lookup columns.
+9. ~~**Database tidy-up:** `VACUUM`/`ANALYZE` after the build, and check indexes on the lookup columns.~~ Done: the build runs `ANALYZE` then `VACUUM`; every column `lexicon_db.py` looks up by already had an index; `tests/test_lexicon_db.py` checks the query plans and `sqlite_stat1` on the fixture database.
 10. **Windows build:** dispatch `.github/workflows/windows-build.yml` on `upgrade-2` (Actions tab, "Run workflow") and fix anything it reports.
 11. **Open a PR** from `upgrade-2` to `main` with a short list of what changed and the new shortcut.
 
