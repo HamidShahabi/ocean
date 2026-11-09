@@ -1,7 +1,7 @@
 """Dictionary sources: one module per dataset, one registry the lookup engine merges.
 
 Every source reads the local database (lexicon_db.LexiconDB, built by tools/build_lexicon_db.py), so lookups need
-no network. To fix, replace or switch off a source, touch only its module (or REGISTRY.set_enabled(name, False)).
+no network. To fix or replace a source, touch only its module.
 To add one, subclass DictionarySource and register it below; position in the list is merge order.
 """
 from .base import DictionarySource, LookupContext, PartialEntry, SourceRegistry, merge_entries

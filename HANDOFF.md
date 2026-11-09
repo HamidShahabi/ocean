@@ -48,7 +48,7 @@ If a session needs them, attach them again.
 ### Not done yet
 1. ~~Merge `upgrade/d-engine` into `upgrade-2`.~~ Done. Conflicts were README and three tests; the engine keeps `set_offline_only` as a hard switch, so `tests/test_offline_mode.py` stays.
 2. ~~Merge `upgrade/e-data` into `upgrade-2`.~~ Done (only HANDOFF.md conflicted).
-3. ~~Match `ui/results_page.py` to the engine payload.~~ Done: reads `common_expressions` only, shows `forms`, `alternatives` and the `phrase_match` note, IPA labels go through `theme.style_ipa_label`. The engine still sends `derived_terms` as an alias nothing reads; drop it in item 8.
+3. ~~Match `ui/results_page.py` to the engine payload.~~ Done: reads `common_expressions` only, shows `forms`, `alternatives` and the `phrase_match` note, IPA labels go through `theme.style_ipa_label`. The `derived_terms` alias is gone (item 8).
 4. ~~Match the Sources page to the engine's real routing.~~ Done: dictionary sources in `REGISTRY` order, then idioms, cache, Google, optional local model, NLLB; `tests/test_pages_ui.py` checks the order.
 5. **Persian for the idiom list (in progress: 1,500 of 9,382 done).**
    - Done: `part-01.tsv` to `part-03.tsv` in `data/idioms_fa_parts/` cover rows 1–1500 of `data/idioms_en.tsv.gz`; `data/idioms_fa.tsv.gz` is rebuilt with `tools/build_idioms.py merge-fa`.
@@ -60,8 +60,8 @@ If a session needs them, attach them again.
    - Read-only, with no network at runtime.
    - `api.urbandictionary.com` was reachable from the cloud environment.
    - **Blocked (2026-11-09):** `api.urbandictionary.com` answers from here, but `thumbs_up` and `thumbs_down` are 0 for every definition, so the API cannot rank entries or drop jokes by votes, and there is no "top" endpoint. A real dump with votes (as of May 2016, no examples column) exists as `opensporks/urban_dict_word_defs` on Hugging Face (`urbandict-word-defs.csv`, 538 MB, a mirror of the Kaggle "Urban Dictionary Words and Definitions" set). Nothing is built yet; it needs a decision on downloading that file.
-7. **Startup:** defer slow imports and preloads in `app.py`.
-8. **Remove leftover dead code:** `record_taught_entry`, `REGISTRY.set_enabled`, `tests/test_source_toggles.py`, and anything still pointing at removed pages.
+7. ~~**Startup:** defer slow imports and preloads in `app.py`.~~ Done: `kokoro_onnx`/`numpy` load with the voice model (started after the window is shown, `ui/speaker.py`) and `ctranslate2`/`sentencepiece` load with the NLLB model (`_load_ct2_model`). Time to window shown (offscreen, 5 runs): about 1.5-1.8 s before, 1.1-1.4 s after; `import app` alone 1.2 s to 0.7 s. `requests` (about 0.18 s) is still imported at start: `OfflineModeError` subclasses its exception and the sessions are built at import.
+8. ~~**Remove leftover dead code:** `record_taught_entry`, `REGISTRY.set_enabled`, `tests/test_source_toggles.py`, and anything still pointing at removed pages.~~ Done, together with `is_enabled`/`disabled_names`/`any_enabled` and the engine's `derived_terms` alias. The two settings tests moved to `tests/test_ui_smoke.py` (`RemovedSettingsTest`). `delete_taught_entry` has no caller either but was not on the list; saved `entries` are still read.
 9. ~~**Database tidy-up:** `VACUUM`/`ANALYZE` after the build, and check indexes on the lookup columns.~~ Done: the build runs `ANALYZE` then `VACUUM`; every column `lexicon_db.py` looks up by already had an index; `tests/test_lexicon_db.py` checks the query plans and `sqlite_stat1` on the fixture database.
 10. **Windows build:** dispatch `.github/workflows/windows-build.yml` on `upgrade-2` (Actions tab, "Run workflow") and fix anything it reports.
 11. **Open a PR** from `upgrade-2` to `main` with a short list of what changed and the new shortcut.

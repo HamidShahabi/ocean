@@ -1,8 +1,8 @@
 """The contract every dictionary source follows, the partial entry it fills and the registry
-that runs the enabled ones and merges what they return."""
+that runs the ones that apply and merges what they return."""
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import lexical_engine as le
 
@@ -92,7 +92,6 @@ class SourceRegistry:
 
     def __init__(self) -> None:
         self._sources: List[DictionarySource] = []
-        self._disabled: Set[str] = set()
 
     def register(self, source: DictionarySource) -> DictionarySource:
         if not source.name or source.name in self.names():
@@ -115,22 +114,8 @@ class SourceRegistry:
                 return s
         raise KeyError(name)
 
-    def set_enabled(self, name: str, enabled: bool) -> None:
-        self.get(name)  # unknown names are a programming error, not a silent no-op
-        (self._disabled.discard if enabled else self._disabled.add)(name)
-
-    def is_enabled(self, name: str) -> bool:
-        return name not in self._disabled
-
-    def any_enabled(self) -> bool:
-        """False when the user has switched every source off."""
-        return any(s.name not in self._disabled for s in self._sources)
-
-    def disabled_names(self) -> List[str]:
-        return sorted(self._disabled)
-
     def active(self, ctx: LookupContext) -> List[DictionarySource]:
-        return [s for s in self._sources if s.name not in self._disabled and s.applies(ctx)]
+        return [s for s in self._sources if s.applies(ctx)]
 
     def run(self, ctx: LookupContext) -> PartialEntry:
         """Look the term up in every active source at once (a source with `needs` waits for those) and merge."""

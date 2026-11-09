@@ -135,13 +135,11 @@ except Exception:
     log.warning("eng_to_ipa unavailable: IPA falls back to rule-based G2P", exc_info=True)
     ipa_engine = None
 
-try:
-    import ctranslate2
-    import sentencepiece as spm
-    HAS_CT2_BACKUP = True
-except Exception:
-    log.warning("ctranslate2/sentencepiece unavailable: no offline translation", exc_info=True)
-    HAS_CT2_BACKUP = False
+# ctranslate2 and sentencepiece are imported by _load_ct2_model(), in the preload thread after the window is
+# shown. HAS_CT2_BACKUP starts optimistic and turns False if the import fails.
+ctranslate2: Any = None
+spm: Any = None
+HAS_CT2_BACKUP = True
 
 _CT2_TRANSLATOR = None
 _SP_PROCESSOR = None
@@ -187,7 +185,7 @@ TRANSLATION_CACHE = translation_cache.TranslationCache(os.path.join(USER_DATA_DI
 
 def _load_ct2_model() -> None:
     """Load the CTranslate2 model once; concurrent callers wait for the load in progress."""
-    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB
+    global _CT2_TRANSLATOR, _SP_PROCESSOR, _CT2_IS_NLLB, HAS_CT2_BACKUP, ctranslate2, spm
     with _CT2_LOAD_LOCK:
         if _CT2_TRANSLATOR is not None and _SP_PROCESSOR is not None:
             return
@@ -195,6 +193,15 @@ def _load_ct2_model() -> None:
         md_p = os.path.join(OFFLINE_MT_DIR, "model")
         if not (os.path.exists(sp_p) and os.path.isdir(md_p)):
             return
+        if ctranslate2 is None or spm is None:
+            try:
+                import ctranslate2 as ct2_module
+                import sentencepiece as spm_module
+            except Exception:
+                log.warning("ctranslate2/sentencepiece unavailable: no offline translation", exc_info=True)
+                HAS_CT2_BACKUP = False
+                return
+            ctranslate2, spm = ct2_module, spm_module
         sp_proc = spm.SentencePieceProcessor(model_file=sp_p)
         translator = ctranslate2.Translator(md_p, device="cpu", compute_type="int8")
         vocab_p = os.path.join(md_p, "shared_vocabulary.txt")
@@ -295,23 +302,6 @@ def record_user_override(en_text: str, fa_text: str) -> None:
     if key and fa_text.strip():
         USER_MEMORY.setdefault("overrides", {})[key] = fa_text.strip()
         save_user_memory()
-
-
-def record_taught_entry(term: str, fa_equiv: str, pos: str, eng_def: str, ex_en: str, ex_fa: str) -> None:
-    key = term.strip().lower()
-    if not key:
-        return
-    USER_MEMORY.setdefault("entries", {})[key] = {
-        "headword": term.strip(),
-        "fa": fa_equiv.strip(),
-        "pos": pos.strip() or "Entry",
-        "def": eng_def.strip(),
-        "example_en": ex_en.strip(),
-        "example_fa": ex_fa.strip(),
-    }
-    if fa_equiv.strip():
-        USER_MEMORY.setdefault("overrides", {})[key] = fa_equiv.strip()
-    save_user_memory()
 
 
 def delete_taught_entry(term: str) -> None:
@@ -1854,7 +1844,6 @@ def _analyze_sentence(clean: str) -> Dict[str, Any]:
         "sentence_breakdown": key_terms,
         "collocations": [],
         "common_expressions": [],
-        "derived_terms": [],
         "forms": [],
         "alternatives": [],
         "morphology": _empty_morphology(clean),
@@ -1892,7 +1881,7 @@ def _analyze_with_dictionaries(term: str, on_preview: Optional[Callable[[Dict[st
     fa_pool = ThreadPoolExecutor(max_workers=1)  # the headword's Persian, possibly slow (Google, the models)
     try:
         f_fa = submit_in_context(fa_pool, fetch_persian_word_meaning, typed, is_idiom_or_phrase)
-        merged = sources.REGISTRY.run(ctx)  # every enabled dictionary source, merged in registry order
+        merged = sources.REGISTRY.run(ctx)  # every dictionary source that applies, merged in registry order
         data = _build_word_entry(clean, words, is_idiom_or_phrase, morphology, root_lemma, merged, f_fa, on_preview, typed)
         if phrase_match:
             data["phrase_match"] = phrase_match
@@ -2006,7 +1995,6 @@ def _build_word_entry(clean: str, words: List[str], is_idiom_or_phrase: bool, mo
             "sentence_breakdown": [],
             "collocations": [related(c) for c in colls_raw],
             "common_expressions": common,
-            "derived_terms": common,  # the former name of common_expressions, kept for entries saved by older versions' readers
             "forms": forms,
             "alternatives": alternatives,
             "morphology": morphology,

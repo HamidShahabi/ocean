@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton  # noqa
 import lexical_engine  # noqa: E402
 from lexicon_fixture import use_lexicon  # noqa: E402
 from ui import theme  # noqa: E402
+from ui.config import SettingsManager  # noqa: E402
 from ui.drawer import PAGE_HISTORY, PAGE_MENU, PAGE_REPORTS, PAGE_SETTINGS, PAGE_SOURCES  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 
@@ -81,6 +83,27 @@ def card_texts(win):
         if card is not None:
             texts += [lbl.text() for lbl in card.findChildren(QLabel)]
     return texts
+
+
+class RemovedSettingsTest(unittest.TestCase):
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "settings.json")
+
+    def test_the_source_toggles_are_not_a_setting_any_more(self):
+        s = SettingsManager(self.path)
+        self.assertNotIn("disabled_sources", s.data)
+        self.assertFalse(hasattr(s, "apply_sources"))
+
+    def test_an_old_settings_file_with_the_toggles_still_loads_and_drops_them(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"theme": "Light Mode", "disabled_sources": ["cambridge", "wordnet", 7], "reader_min_level": "C1"}, f)
+        s = SettingsManager(self.path)
+        self.assertEqual(s.data["theme"], "Light Mode")
+        self.assertNotIn("disabled_sources", s.data)
+        self.assertNotIn("reader_min_level", s.data)
+        s.save()
+        with open(self.path, encoding="utf-8") as f:
+            self.assertNotIn("disabled_sources", json.load(f))
 
 
 class UiSmokeTest(unittest.TestCase):

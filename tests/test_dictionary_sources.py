@@ -17,11 +17,6 @@ import dictionary_sources as ds  # noqa: E402
 from dictionary_sources import LookupContext, PartialEntry, DictionarySource, SourceRegistry, merge_entries  # noqa: E402
 
 
-def enable_every_source():
-    for name in ds.REGISTRY.names():
-        ds.REGISTRY.set_enabled(name, True)
-
-
 class ContractTest(unittest.TestCase):
     def test_the_three_datasets_in_merge_order(self):
         self.assertEqual(ds.REGISTRY.names(), ["kaikki", "urban_dictionary", "corpora"])  # no WordNet any more
@@ -146,8 +141,8 @@ class RegistryRunTest(unittest.TestCase):
             reg.register(src)
         return reg, calls
 
-    def test_merge_order_needs_and_disabled_sources(self):
-        reg, calls = self.make(
+    def test_merge_order_and_needs(self):
+        reg, _ = self.make(
             ("a", (), lambda e, p: e.senses.append({"def": "from a"})),
             ("b", ("a",), lambda e, p: e.senses.append({"def": f"b saw {len(p.senses)}"})),
             ("c", (), lambda e, p: setattr(e, "ipa_us", "/c/")),
@@ -155,15 +150,6 @@ class RegistryRunTest(unittest.TestCase):
         merged = reg.run(LookupContext(term="x"))
         self.assertEqual([s["def"] for s in merged.senses], ["from a", "b saw 1"])
         self.assertEqual(merged.ipa_us, "/c/")
-        reg.set_enabled("a", False)
-        calls.clear()
-        merged = reg.run(LookupContext(term="x"))
-        self.assertNotIn("a", calls)
-        self.assertEqual([s["def"] for s in merged.senses], ["b saw 0"])  # a need that is switched off is just absent
-        for name in reg.names():
-            reg.set_enabled(name, False)
-        self.assertEqual(reg.run(LookupContext(term="x")), PartialEntry())
-        self.assertFalse(reg.any_enabled())
 
     def test_registration_rules(self):
         reg, _ = self.make(("a", (), lambda e, p: None))
@@ -172,7 +158,7 @@ class RegistryRunTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             reg.register(reg.get("a"))
         with self.assertRaises(KeyError):
-            reg.set_enabled("cambridge", False)
+            reg.get("cambridge")
 
     def test_failures_are_logged_with_the_source_name_and_keep_partial_results(self):
         def broken(e, p):
@@ -200,7 +186,6 @@ class RegistryRunTest(unittest.TestCase):
 class EngineIntegrationTest(unittest.TestCase):
     def setUp(self):
         use_lexicon(self)
-        self.addCleanup(enable_every_source)
         for p in (
             mock.patch.object(le, "_google_translate", return_value=""),
             mock.patch.object(le, "_ct2_translate", return_value=""),
@@ -229,7 +214,7 @@ class EngineIntegrationTest(unittest.TestCase):
         self.assertEqual(d["senses"][1]["example_source"], "Tatoeba")  # no subtitle line left, no Wiktionary example for it
         self.assertEqual(d["senses"][2]["example_en"], "I bank with a local branch.")  # Wiktionary's own, before Tatoeba
         self.assertEqual([c["term"] for c in d["collocations"]], ["blood bank", "data bank"])
-        self.assertEqual(d["common_expressions"], d["derived_terms"])
+        self.assertNotIn("derived_terms", d)
         self.assertEqual([f["form"] for f in d["forms"]], [])
         self.assertEqual(d["synonyms"], [])  # Wiktionary lists none, and nothing is made up
         self.assertEqual(d["antonyms"], [])
@@ -286,15 +271,8 @@ class EngineIntegrationTest(unittest.TestCase):
         d = le.analyze_with_dictionaries("break the ice")
         self.assertTrue(d["is_idiom"])
         self.assertEqual(d["senses"][0]["example_en"], "He told a joke to break the ice.")
-        self.assertEqual((d["collocations"], d["derived_terms"], d["common_expressions"]), ([], [], []))
+        self.assertEqual((d["collocations"], d["common_expressions"]), ([], []))
         self.assertEqual((d["persian_equivalent"], d["persian_source"]), ("یخ را شکستن", le.FA_SOURCE_IDIOMS))
-
-    def test_lookup_works_with_every_source_switched_off(self):
-        for name in ds.REGISTRY.names():
-            ds.REGISTRY.set_enabled(name, False)
-        d = le.analyze_with_dictionaries("bank")
-        self.assertEqual(d["senses"], [])
-        self.assertEqual(d["persian_equivalent"], "بانک ، ساحل")  # the translation tiers still answer
 
     def test_sentence_breakdown_finds_dictionary_phrases_first(self):
         d = le.analyze_with_dictionaries("They tried hard to break the ice with the new bank manager.")

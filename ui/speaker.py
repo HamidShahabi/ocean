@@ -15,17 +15,16 @@ import wave
 from collections import OrderedDict, deque
 from typing import Any, Optional
 
-from PyQt6.QtCore import QCoreApplication, QObject
+from PyQt6.QtCore import QCoreApplication, QObject, QTimer
 
 import kokoro_files
 from ui.config import BASE_DIR, VOICE_OPTIONS, SettingsManager
 
-try:
-    import numpy as np
-    from kokoro_onnx import Kokoro
-    HAS_KOKORO = True
-except Exception:
-    HAS_KOKORO = False
+# numpy and kokoro_onnx cost ~0.4 s to import, so they load with the voice model (_init_kokoro), after the
+# window is shown. HAS_KOKORO starts optimistic and turns False if the import fails.
+np: Any = None
+Kokoro: Any = None
+HAS_KOKORO = True
 
 try:
     import pythoncom
@@ -94,9 +93,13 @@ class NeuralSpeaker(QObject):
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._on_quit)
+        self._loaded = threading.Event()
+        # Once the event loop runs, i.e. after the window is shown, so the load does not compete with building it.
+        QTimer.singleShot(0, self._start_loading)
+
+    def _start_loading(self) -> None:
         # Not a daemon: quitting while onnxruntime is mid-load (~1s after start) crashes the process,
         # so let interpreter shutdown wait for the load to finish.
-        self._loaded = threading.Event()
         threading.Thread(target=self._load_kokoro).start()
 
     def _on_quit(self) -> None:
@@ -119,8 +122,16 @@ class NeuralSpeaker(QObject):
         ])
 
     def _init_kokoro(self) -> None:
+        global np, Kokoro, HAS_KOKORO
         if not HAS_KOKORO:
             return
+        try:
+            import numpy
+            from kokoro_onnx import Kokoro as kokoro_class
+        except Exception:
+            HAS_KOKORO = False
+            return
+        np, Kokoro = numpy, kokoro_class
         onnx_p, voic_p = self._find_model_files()
         if onnx_p and voic_p:
             try:

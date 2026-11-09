@@ -194,7 +194,7 @@ class FormsRootsAndExpressionsTest(EngineTestCase):
     def test_privilege_keeps_only_common_expressions_once(self):
         d = self.lookup("privilege")
         self.assertEqual(d["common_expressions"], ["check your privilege", "white privilege"])
-        self.assertEqual(d["derived_terms"], d["common_expressions"])  # the old name, for readers of saved entries
+        self.assertNotIn("derived_terms", d)
         for rare in ("deprivilege", "privilegeless", "unprivileged", "cisprivilege", "cis-privilege", "cis privilege"):
             self.assertNotIn(rare, d["common_expressions"])
 
