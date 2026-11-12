@@ -255,6 +255,37 @@ URBAN = [
     {"word": "dial it down", "definition": "To tone down intensity or attitude.", "example": "Dial it down, man.", "thumbs_up": "30", "thumbs_down": "2"},
 ]
 
+# The raw Urban Dictionary dump tools/build_slang_db.py reads (word_id, word, up_votes, down_votes, author, definition)
+# and what the API would answer with for each word_id (None: the definition no longer exists).
+UD_DUMP = [
+    (101, "rizz", 900, 100, "Charisma, especially in [flirting]. Used a lot online."),
+    (102, "rizz", 300, 10, "Another rizz definition with fewer votes."),
+    (103, "yeet", 500, 20, "To throw something with force.;;2. An exclamation."),
+    (104, "no cap", 400, 50, "No lie; for real."),
+    (105, "slay", 2000, 300, "To do something exceptionally well, with style. " + "It is used of performances and outfits. " * 12),
+    (106, "bruh", 50, 1, "Too few up votes."),
+    (107, "hot take", 300, 200, "Too controversial: not enough of the votes are up."),
+    (108, "mom joke", 800, 10, "Your mom is so old she remembers the dinosaurs."),
+    (109, "sus", 700, 40, "Suspicious. What the fuck is that."),
+    (110, "Jane Doe", 800, 5, "A woman whose name is not known."),
+    (111, "bigot", 800, 5, "A stupid nigger-hating person."),
+    (112, "fuckery", 800, 5, "Nonsense and trouble of any kind."),
+    (113, "vibe check", 350, 15, "A quick test of the mood somebody is in."),
+]
+UD_API = {101: "He has so much rizz.\nSecond paragraph.", 103: "Yeet the ball!", 104: "That was great, no cap.", 105: "Totally unrelated.",
+          113: None}
+
+
+def write_ud_dump(folder: str) -> str:
+    path = os.path.join(folder, "urbandict-word-defs.csv")
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["word_id", "word", "up_votes", "down_votes", "author", "definition"])
+        for defid, word, up, down, definition in UD_DUMP:
+            w.writerow([f"{defid:07d}", word, up, down, "abc123", definition])
+    return path
+
+
 _BUILT: Optional[str] = None
 
 
