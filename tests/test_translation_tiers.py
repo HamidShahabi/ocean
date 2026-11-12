@@ -61,6 +61,7 @@ class TierOrderTest(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.addCleanup(le.set_offline_only, False)
+        self._patch("_probe_connectivity", return_value=True)  # the internet is there, unless a test sets offline-only
 
     def _patch(self, *args, **kwargs):
         target = (le, *args) if isinstance(args[0], str) else args
@@ -73,8 +74,29 @@ class TierOrderTest(unittest.TestCase):
         self.assertEqual(le.translate_with_source("Bank"), ("بانک من", le.FA_SOURCE_EDIT))
         self.google.assert_not_called()
 
-    def test_local_before_google(self):
-        self.assertEqual(le.translate_with_source("bank", is_short=True)[1], le.FA_SOURCE_WIKTIONARY)
+    def test_human_translations_of_phrases_come_before_google(self):
+        self.assertEqual(le.translate_with_source("Break a leg!"), ("موفق باشی!", "OpenSubtitles"))
+        self.assertEqual(le.translate_with_source("dial it down")[1], le.FA_SOURCE_IDIOMS)
+        self.google.assert_not_called()
+
+    def test_an_idiom_with_persian_never_reaches_a_machine_translator(self):
+        le.set_offline_only(True)
+        for use_slm in (False, True):
+            self.assertEqual(le.translate_with_source("dial it down", use_slm=use_slm), ("آرام تر باش", le.FA_SOURCE_IDIOMS))
+        self.assertEqual(le.fetch_persian_word_meaning("dial it down", is_idiom=True), ("آرام تر باش", le.FA_SOURCE_IDIOMS))
+        for machine in (self.google, self.slm, self.nllb, self.nllb_batch):
+            machine.assert_not_called()
+
+    def test_online_google_comes_before_wiktionary_for_a_word_and_is_cached(self):
+        self.assertEqual(le.translate_with_source("bank", is_short=True), ("گوگل", le.FA_SOURCE_GOOGLE))
+        self.google.reset_mock()
+        le.set_offline_only(True)  # the next lookup, with no internet: the cached answer, not Wiktionary's
+        self.assertEqual(le.translate_with_source("bank", is_short=True), ("گوگل", le.FA_SOURCE_GOOGLE))
+        self.google.assert_not_called()
+
+    def test_without_internet_a_word_takes_wiktionarys_everyday_equivalents(self):
+        le.set_offline_only(True)
+        self.assertEqual(le.translate_with_source("bank", is_short=True), ("بانک ، ساحل", le.FA_SOURCE_WIKTIONARY))
         self.google.assert_not_called()
 
     def test_online_google_then_offline_tiers(self):
@@ -82,7 +104,8 @@ class TierOrderTest(unittest.TestCase):
         le.set_offline_only(True)
         self.google.reset_mock()
         self.assertEqual(le.translate_with_source("raining cats and dogs", use_slm=True), ("مدل", le.FA_SOURCE_SLM))
-        self.assertEqual(le.translate_with_source("raining cats and dogs")[1], le.FA_SOURCE_NLLB)  # no model asked
+        self.assertEqual(le.translate_with_source("raining cats and dogs", use_slm=True), ("مدل", le.FA_SOURCE_SLM))  # remembered
+        self.assertEqual(le.translate_with_source("raining pitchforks")[1], le.FA_SOURCE_NLLB)  # no model asked
         self.google.assert_not_called()
 
     def test_the_model_falls_back_to_nllb_when_it_has_no_answer(self):
@@ -92,7 +115,7 @@ class TierOrderTest(unittest.TestCase):
 
     def test_idioms_and_sentences_use_the_model_words_do_not(self):
         le.set_offline_only(True)
-        self.assertEqual(le.fetch_persian_word_meaning("spill the beans", is_idiom=True), ("مدل", le.FA_SOURCE_SLM))
+        self.assertEqual(le.fetch_persian_word_meaning("raining cats and dogs", is_idiom=True), ("مدل", le.FA_SOURCE_SLM))
         self.assertEqual(le.fetch_persian_word_meaning("zeitgeist")[1], le.FA_SOURCE_NLLB)
         with mock.patch.object(le, "extract_sentence_key_terms", return_value=[]), mock.patch.object(le, "sentence_to_ipa", return_value=""):
             d = le.analyze_with_dictionaries("The meeting was postponed until next week.")

@@ -2,10 +2,11 @@
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QBuffer, QIODevice, Qt, QTimer
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -15,36 +16,49 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-import dictionary_sources
 import lexical_engine
-from ui.highlight import ExampleHighlighter
-from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS
+from ui.flow_layout import FlowLayout
+from ui.reports_page import ReportPopover
+from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS, style_ipa_label
 from ui.widgets import PersianTranslationWidget, SmoothGlassFrame, create_audio_button
 
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
 
+# Morphology fields that mean "nothing found" (the engine writes these instead of leaving the field empty).
+_NO_AFFIX = {"", "none", "none (base word)", "inflected form"}
+SNAPSHOT_MAX_WIDTH = 1600  # reports store the page as a PNG no wider than this
 
 
-def offline_badge_text(data: Dict[str, Any]) -> str:
-    """The offline-only notice, saying where this result came from."""
-    if data.get("_from_history"):
-        where = "your history (saved lookup)"
-    elif data.get("persian_source") in (lexical_engine.FA_SOURCE_SLM, lexical_engine.FA_SOURCE_NLLB):
-        where = f"Ocean's internal dictionary; Persian by the {data['persian_source']}"
-    else:
-        where = "Ocean's internal dictionary"
-    return f"Offline-only mode \u2014 result from {where}"
+def _term_of(item: Any, *keys: str) -> str:
+    """The word of a list item that is either a plain string or a dict (under one of `keys`)."""
+    if isinstance(item, dict):
+        return next((str(item[k]).strip() for k in keys if item.get(k)), "")
+    return str(item).strip() if item else ""
+
+
+def affix_parts(text: Any) -> tuple:
+    """("un-", "not") from "un-  (not)" and ("-ness", "Noun: state") from "-ness  [Noun: state]";
+    ("", "") when the engine found no affix."""
+    raw = str(text or "").strip()
+    if raw.casefold() in _NO_AFFIX:
+        return "", ""
+    head, _, rest = raw.partition(" ")
+    return head, rest.strip().strip("[]()").strip()
+
+
+def is_composite_structure(structure: Any) -> bool:
+    """A structure like "un- (Prefix) + happy (Root) + -ness (Suffix) -> unhappiness"; a lone word, or
+    "word (Base Root Word)", says nothing the Root row does not."""
+    return "+" in str(structure or "")
+
 
 class ResultsPage(QWidget):
     """Renders a lookup payload (word, idiom, sentence or Persian input) as a stack of cards."""
 
-    favorite_toggled = pyqtSignal(str, bool)  # (term, now saved): the Reader re-marks its text on this
-
     def __init__(self, main_win: "MainWindow") -> None:
         super().__init__()
         self.main_win = main_win
-        self.example_highlighter = ExampleHighlighter(main_win.speaker)
         self.setObjectName('ResultsPage')
         res_vbox = QVBoxLayout(self)
         res_vbox.setContentsMargins(0, 0, 0, 0)
@@ -69,11 +83,17 @@ class ResultsPage(QWidget):
         self.scroll_area.setWidget(self.cards_container)
         res_vbox.addWidget(self.scroll_area, stretch=1)
 
+        self._shown: Optional[tuple] = None  # (query term, payload) on screen: what "!" reports
+        self._report_btn: Optional[QPushButton] = None
+        self._popover: Optional[ReportPopover] = None
+
     def _clear_cards(self) -> None:
+        self.main_win.speaker.reset_prefetch()  # the audio buttons of the new page queue their own clips
         while self.cards_layout.count():
             item = self.cards_layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()  # until deleted it would still be painted (and show up in a snapshot)
                 w.deleteLater()
 
     def _create_audio_button(self, text_to_speak: str) -> QPushButton:
@@ -89,6 +109,16 @@ class ResultsPage(QWidget):
         btn.setToolTip(f"Click to explore '{word_text}'")
         btn.clicked.connect(lambda _, w=word_text: self.main_win._analyze_input(False, w))
         return btn
+
+    @staticmethod
+    def _create_ipa_label(text: str, wrap: bool = False) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setWordWrap(wrap)
+        if wrap:
+            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        style_ipa_label(lbl)
+        return lbl
 
     def _create_persian_widget(self, text: str, en_source: str = "", large: bool = False) -> PersianTranslationWidget:
         px = int(self.main_win.settings.data.get("base_font_px", 14))
@@ -167,10 +197,7 @@ class ResultsPage(QWidget):
         top_row.addWidget(self._create_clickable_word_link(term))
 
         if ipa:
-            ipa_lbl = QLabel(ipa)
-            ipa_lbl.setObjectName("IpaText")
-            ipa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            top_row.addWidget(ipa_lbl)
+            top_row.addWidget(self._create_ipa_label(ipa))
 
         top_row.addWidget(self._create_persian_widget(fa, en_source=term, large=False), stretch=1)
         b_lay.addLayout(top_row)
@@ -184,21 +211,14 @@ class ResultsPage(QWidget):
 
             ex_row = QHBoxLayout()
             ex_row.setSpacing(10)
-            # Reading the example aloud highlights each word in ex_lbl as it is spoken.
-            ex_row.addWidget(create_audio_button(
-                ex_en, self.main_win.speaker, self.main_win.settings,
-                on_click=lambda lbl=ex_lbl, t=ex_en: self.example_highlighter.speak(lbl, t)))
+            ex_row.addWidget(self._create_audio_button(ex_en))
 
             ex_col = QVBoxLayout()
             ex_col.setSpacing(3)
             ex_col.addWidget(ex_lbl)
 
             if ex_ipa:
-                s_ipa_lbl = QLabel(ex_ipa)
-                s_ipa_lbl.setWordWrap(True)
-                s_ipa_lbl.setObjectName("IpaText")
-                s_ipa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                ex_col.addWidget(s_ipa_lbl)
+                ex_col.addWidget(self._create_ipa_label(ex_ipa, wrap=True))
 
             ex_row.addLayout(ex_col, stretch=1)
             b_lay.addLayout(ex_row)
@@ -221,6 +241,200 @@ class ResultsPage(QWidget):
             last_sense = sense
             layout.addWidget(self._build_entry_with_example_box(it, radius=14, variant="card"))
 
+    # --- subsections of "Forms, Roots & Alternatives" ---
+    @staticmethod
+    def _subsection(title: str) -> tuple[SmoothGlassFrame, QVBoxLayout]:
+        box = SmoothGlassFrame(radius=18, variant="inner")
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(18, 14, 18, 16)
+        lay.setSpacing(10)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("SubsectionTitle")
+        lay.addWidget(title_lbl)
+        return box, lay
+
+    def _pill_flow(self, pills: List[QPushButton]) -> QWidget:
+        """Word pills that wrap onto new lines instead of running off the page."""
+        holder = QWidget()
+        holder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        flow = FlowLayout(holder, h_spacing=8, v_spacing=8)
+        for pill in pills:
+            flow.addWidget(pill)
+        return holder
+
+    def _build_root_box(self, headword: str, morph: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
+        """Root / base word, how the word is built, and its prefix and suffix; parts the engine did not find are left out."""
+        accent = THEME_COLORS["accent"]
+        root = _term_of(morph.get("root"))
+        structure = str(morph.get("structure") or "")
+        prefix, prefix_meaning = affix_parts(morph.get("prefix"))
+        suffix, suffix_meaning = affix_parts(morph.get("suffix"))
+        is_base = not root or root.lower() == headword.lower()
+
+        rows: List[tuple] = []  # (label, widget)
+        if not is_base or prefix or suffix:
+            rows.append(("Root", self._create_clickable_word_link(root or headword)))
+        else:
+            note = QLabel("This is the base form: no prefix or suffix.")
+            note.setObjectName("MutedText")
+            rows.append(("Base word", note))
+        if is_composite_structure(structure):
+            st_lbl = QLabel(f"<span style='color:{accent}; font-weight:600;'>{structure}</span>")
+            st_lbl.setTextFormat(Qt.TextFormat.RichText)
+            st_lbl.setObjectName("BodyText")
+            st_lbl.setWordWrap(True)
+            st_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            rows.append(("Structure", st_lbl))
+        for label, affix, meaning in (("Prefix", prefix, prefix_meaning), ("Suffix", suffix, suffix_meaning)):
+            if affix:
+                text = f"<b style='color:{accent};'>{affix}</b>" + (f"  <span>{meaning}</span>" if meaning else "")
+                lbl = QLabel(text)
+                lbl.setTextFormat(Qt.TextFormat.RichText)
+                lbl.setObjectName("BodyText")
+                lbl.setWordWrap(True)
+                lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                rows.append((label, lbl))
+        if not rows:
+            return None
+
+        box, lay = self._subsection("Root & Structure")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(10)
+        grid.setColumnMinimumWidth(0, 90)
+        grid.setColumnStretch(1, 1)
+        for r, (label, widget) in enumerate(rows):
+            name = QLabel(label)
+            name.setObjectName("RowLabel")
+            grid.addWidget(name, r, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            if isinstance(widget, QPushButton):  # a pill keeps its own width
+                grid.addWidget(widget, r, 1, Qt.AlignmentFlag.AlignLeft)
+            else:
+                grid.addWidget(widget, r, 1)
+        lay.addLayout(grid)
+        return box
+
+    def _build_family_box(self, headword: str, morph: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
+        """Related forms ("Noun: privilege", "Adjective: privileged"); hidden when it only repeats the headword."""
+        family = [(_term_of(f, "word", "term"), str(f.get("pos", "")) if isinstance(f, dict) else "")
+                  for f in morph.get("family") or []]
+        family = [(w, pos) for w, pos in family if w]
+        if not any(w.lower() != headword.lower() for w, _ in family) and len(family) <= 1:
+            return None
+        box, lay = self._subsection("Word Family")
+        lay.addWidget(self._pill_flow([
+            self._create_clickable_word_link(w, f"{pos}: " if pos else "") for w, pos in family[:8]]))
+        return box
+
+    def _build_expressions_box(self, data: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
+        """Common expressions built on the word (the engine's `common_expressions`, a list of strings)."""
+        terms = data.get("common_expressions") or []
+        if not terms:
+            return None
+        box, lay = self._subsection("Common Expressions")
+        lay.addWidget(self._pill_flow([self._create_clickable_word_link(t) for t in terms[:12]]))
+        return box
+
+    def _build_forms_box(self, data: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
+        """Inflected forms ("past tense: ran"; the engine's `forms`, each {"form", "label"})."""
+        forms = [f for f in data.get("forms") or [] if f.get("form")]
+        if not forms:
+            return None
+        box, lay = self._subsection("Forms")
+        lay.addWidget(self._pill_flow([
+            self._create_clickable_word_link(f["form"], f"{f['label']}: " if f.get("label") else "") for f in forms]))
+        return box
+
+    def _build_alternatives_box(self, data: Dict[str, Any]) -> Optional[SmoothGlassFrame]:
+        """Alternative spellings of the word (the engine's `alternatives`, a list of strings)."""
+        words = data.get("alternatives") or []
+        if not words:
+            return None
+        box, lay = self._subsection("Alternative Spellings")
+        lay.addWidget(self._pill_flow([self._create_clickable_word_link(w) for w in words]))
+        return box
+
+    def _build_relation_box(self, title: str, items: List[Dict[str, str]]) -> SmoothGlassFrame:
+        box, lay = self._subsection(title)
+        self._add_relation_boxes(lay, items)
+        return box
+
+    # --- header buttons: Refresh, Save and the "!" report capsule ---
+    def _add_header_actions(self, header: QHBoxLayout, query_term: str, data: Dict[str, Any], with_save: bool = False) -> None:
+        ref_btn = QPushButton("Refresh")
+        ref_btn.setObjectName("GlassPillButton")
+        ref_btn.setFixedHeight(34)
+        ref_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        ref_btn.setToolTip("Look this up again with online resources")
+        ref_btn.clicked.connect(lambda: self.main_win.refresh_current())
+        header.addWidget(ref_btn)
+
+        if with_save:
+            is_fav = bool(data.get("_is_favorite", False))
+            fav_btn = QPushButton("\u2605 Saved" if is_fav else "\u2606 Save")
+            fav_btn.setObjectName("GlassPillButton")
+            fav_btn.setFixedHeight(34)
+            fav_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+            def _toggle_fav() -> None:
+                db = self.main_win.db
+                if db.get_entry(query_term) is None:  # deleted from the history while on screen: save it again
+                    db.save_entry(query_term, data)
+                new_state = db.toggle_favorite(query_term)
+                fav_btn.setText("\u2605 Saved" if new_state else "\u2606 Save")
+                self.main_win.right_drawer.refresh_history()
+
+            fav_btn.clicked.connect(_toggle_fav)
+            header.addWidget(fav_btn)
+
+        report_btn = QPushButton("!")
+        report_btn.setObjectName("ReportBangButton")
+        report_btn.setFixedSize(40, 34)
+        report_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        report_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        report_btn.clicked.connect(lambda: self._on_report_clicked(query_term, data))
+        header.addWidget(report_btn)
+        self._shown = (query_term, data)
+        self._report_btn = report_btn
+        self.sync_report_button()
+
+    def sync_report_button(self) -> None:
+        """Show "!" as filled once the entry on screen has a report (and plain again when it has none)."""
+        btn = self._report_btn
+        if btn is None or self._shown is None:
+            return
+        reported = self.main_win.reports.latest_for(self._shown[0]) is not None
+        btn.setProperty("reported", reported)
+        btn.setToolTip("Reported. Click to add a note or remove the report" if reported
+                       else "Report a problem with this result")
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
+    def snapshot_png(self) -> bytes:
+        """The whole result page (not just the part scrolled into view) as PNG bytes."""
+        pix = self.cards_container.grab()
+        if pix.width() > SNAPSHOT_MAX_WIDTH:
+            pix = pix.scaledToWidth(SNAPSHOT_MAX_WIDTH, Qt.TransformationMode.SmoothTransformation)
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        pix.save(buf, "PNG")
+        return bytes(buf.data())
+
+    def _on_report_clicked(self, query_term: str, data: Dict[str, Any]) -> None:
+        reports = self.main_win.reports
+        existing = reports.latest_for(query_term)
+        if existing is None:
+            report_id = self.main_win.report_result(query_term, data, self.snapshot_png())
+            note = ""
+        else:
+            report_id, note = existing["id"], existing["note"]
+        self.sync_report_button()
+        btn = self._report_btn
+        if btn is None:
+            return
+        self._popover = ReportPopover(self.main_win, report_id, note, existing is not None, self.sync_report_button)
+        self._popover.show_below(btn)
+
     # === SECTION 9: STRUCTURED RESULT RENDERER (SUPPORTS BOTH WORD/IDIOM & FULL-SENTENCE STACKED LAYOUT) ===
     def _render_reverse_result(self, query_term: str, data: Dict[str, Any]) -> None:
         """Persian input: the English translation and clickable English candidates."""
@@ -230,12 +444,7 @@ class ResultsPage(QWidget):
         px = int(self.main_win.settings.data.get("base_font_px", 14))
 
         card, vbox, header = self._create_glass_card("1. Persian \u2192 English")
-        ref_btn = QPushButton("Refresh")
-        ref_btn.setObjectName("GlassPillButton")
-        ref_btn.setFixedHeight(34)
-        ref_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        ref_btn.clicked.connect(lambda: self.main_win._analyze_input(True))
-        header.addWidget(ref_btn)
+        self._add_header_actions(header, query_term, data)
 
         hw_box = SmoothGlassFrame(radius=18, variant="inner")
         hw_vbox = QVBoxLayout(hw_box)
@@ -314,24 +523,10 @@ class ResultsPage(QWidget):
         self.cards_layout.addWidget(card)
         self.cards_layout.addStretch()
 
-    def _add_all_sources_off_notice(self) -> None:
-        """Explain the empty definitions when every dictionary source is switched off in Settings
-        (a separate case from offline-only mode, which leaves the bundled sources on)."""
-        card, vbox, _ = self._create_glass_card("All dictionary sources are turned off")
-        msg = QLabel("No dictionary source was used for this word, so there are no definitions, synonyms or examples. "
-                     "Turn some back on under Menu > Settings > Dictionary sources.")
-        msg.setObjectName("BodyText")
-        msg.setWordWrap(True)
-        vbox.addWidget(msg)
-        self.cards_layout.addWidget(card)
-
     def render(self, query_term: str, data: Dict[str, Any]) -> None:
         self._clear_cards()
-        if lexical_engine.is_offline_only():
-            badge = QLabel(offline_badge_text(data))
-            badge.setObjectName("OfflineBadge")
-            badge.setWordWrap(True)
-            self.cards_layout.addWidget(badge)
+        self._shown = None
+        self._report_btn = None
         if data.get("is_reverse"):
             self._render_reverse_result(query_term, data)
             return
@@ -341,7 +536,6 @@ class ResultsPage(QWidget):
         is_idiom = bool(data.get("is_idiom", False))
         did_you_mean = data.get("did_you_mean", "")
         ipa_us = data.get("ipa_us", "/-/")
-        is_fav = bool(data.get("_is_favorite", False))
         fa_equiv = data.get("persian_equivalent", "")
         senses: List[Dict[str, str]] = data.get("senses", [])
         sent_breakdown: List[Dict[str, str]] = data.get("sentence_breakdown", [])
@@ -355,34 +549,11 @@ class ResultsPage(QWidget):
             dym_btn.clicked.connect(lambda _, w=did_you_mean: self.main_win._analyze_input(False, w))
             self.cards_layout.addWidget(dym_btn)
 
-        if not is_sentence and not senses and not dictionary_sources.REGISTRY.any_enabled():
-            self._add_all_sources_off_notice()
-
         # --- SECTION 1: Overview & Definitions ---
         card1_title = "1. Sentence Analysis & Translation" if is_sentence else "1. Overview & Definitions"
         card1, vbox1, header1 = self._create_glass_card(card1_title)
 
-        ref_btn = QPushButton("Refresh")
-        ref_btn.setObjectName("GlassPillButton")
-        ref_btn.setFixedHeight(34)
-        ref_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        ref_btn.clicked.connect(lambda: self.main_win._analyze_input(True))
-        header1.addWidget(ref_btn)
-
-        fav_btn = QPushButton("\u2605 Saved" if is_fav else "\u2606 Save")
-        fav_btn.setObjectName("GlassPillButton")
-        fav_btn.setFixedHeight(34)
-        fav_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-
-        def _toggle_fav() -> None:
-            new_state = self.main_win.db.toggle_favorite(query_term)
-            fav_btn.setText("\u2605 Saved" if new_state else "\u2606 Save")
-            self.main_win.refresh_review_badges()
-            self.main_win.right_drawer.refresh_history()
-            self.favorite_toggled.emit(query_term, new_state)
-
-        fav_btn.clicked.connect(_toggle_fav)
-        header1.addWidget(fav_btn)
+        self._add_header_actions(header1, query_term, data, with_save=True)
 
         hw_box = SmoothGlassFrame(radius=18, variant="inner")
 
@@ -404,12 +575,7 @@ class ResultsPage(QWidget):
             line1_row.addWidget(sent_lbl, 1)
             hw_vbox.addLayout(line1_row)
 
-            ipa_lbl = QLabel(f"US  {ipa_us}")
-            ipa_lbl.setWordWrap(True)
-            ipa_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            ipa_lbl.setObjectName("IpaText")
-            ipa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            hw_vbox.addWidget(ipa_lbl)
+            hw_vbox.addWidget(self._create_ipa_label(f"US  {ipa_us}", wrap=True))
 
             hw_vbox.addWidget(self._create_persian_widget(fa_equiv, en_source=headword, large=True))
         else:
@@ -425,14 +591,17 @@ class ResultsPage(QWidget):
             hw_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             hw_lay.addWidget(hw_lbl)
 
-            ipa_lbl = QLabel(f"US  {ipa_us}")
-            ipa_lbl.setObjectName("IpaText")
-            ipa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            hw_lay.addWidget(ipa_lbl)
+            hw_lay.addWidget(self._create_ipa_label(f"US  {ipa_us}"))
 
             hw_lay.addWidget(self._create_persian_widget(fa_equiv, en_source=headword, large=True), stretch=1)
 
         vbox1.addWidget(hw_box)
+        match = data.get("phrase_match")
+        if match:
+            note = QLabel(f"Showing the dictionary entry \u201c{match['entry']}\u201d for \u201c{match['typed']}\u201d.")
+            note.setObjectName("MutedText")
+            note.setWordWrap(True)
+            vbox1.addWidget(note)
         badge_row = self._create_level_badges(data)
         if badge_row is not None:
             vbox1.addLayout(badge_row)
@@ -467,20 +636,14 @@ class ResultsPage(QWidget):
 
                 ex_row = QHBoxLayout()
                 ex_row.setSpacing(10)
-                ex_row.addWidget(create_audio_button(
-                    ex_en, self.main_win.speaker, self.main_win.settings,
-                    on_click=lambda lbl=en_sent_lbl, t=ex_en: self.example_highlighter.speak(lbl, t)))
+                ex_row.addWidget(self._create_audio_button(ex_en))
 
                 ex_col = QVBoxLayout()
                 ex_col.setSpacing(3)
                 ex_col.addWidget(en_sent_lbl)
 
                 if ex_ipa:
-                    ipa_sent_lbl = QLabel(ex_ipa)
-                    ipa_sent_lbl.setWordWrap(True)
-                    ipa_sent_lbl.setObjectName("IpaText")
-                    ipa_sent_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                    ex_col.addWidget(ipa_sent_lbl)
+                    ex_col.addWidget(self._create_ipa_label(ex_ipa, wrap=True))
 
                 ex_row.addLayout(ex_col, stretch=1)
                 s_vbox.addLayout(ex_row)
@@ -505,10 +668,7 @@ class ResultsPage(QWidget):
                 top_r.addWidget(self._create_audio_button(kt["term"]))
                 top_r.addWidget(self._create_clickable_word_link(kt["term"]))
 
-                ipa_l = QLabel(kt.get("ipa", ""))
-                ipa_l.setObjectName("IpaText")
-                ipa_l.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                top_r.addWidget(ipa_l)
+                top_r.addWidget(self._create_ipa_label(kt.get("ipa", "")))
 
                 top_r.addWidget(self._create_persian_widget(kt.get("fa", ""), en_source=kt["term"], large=False), stretch=1)
                 kt_lay.addLayout(top_r)
@@ -532,99 +692,26 @@ class ResultsPage(QWidget):
                 vbox2.addWidget(self._build_entry_with_example_box(c_item, radius=18, variant="inner"))
             self.cards_layout.addWidget(card2)
 
-        # --- SECTION 3: Word Breakdown, Morphology & Lexical Relations ---
-        morph = data.get("morphology", {})
+        # --- SECTION 3: Forms, Roots & Alternatives ---
+        morph = data.get("morphology") or {}
         syns = data.get("synonyms", [])
         ants = data.get("antonyms", [])
 
-        if (not is_idiom and not is_sentence) or syns or ants:
+        subsections: List[QWidget] = []
+        if not is_idiom and not is_sentence:
+            subsections += [self._build_root_box(headword, morph), self._build_forms_box(data),
+                            self._build_family_box(headword, morph), self._build_expressions_box(data),
+                            self._build_alternatives_box(data)]
+        if syns:
+            subsections.append(self._build_relation_box("Synonyms", syns))
+        if ants:
+            subsections.append(self._build_relation_box("Antonyms", ants))
+        subsections = [sub for sub in subsections if sub is not None]
+        if subsections:
             sec_num = "3" if (not is_idiom and not is_sentence and colls) else "2"
-            card3, vbox3, _ = self._create_glass_card(f"{sec_num}. Word Breakdown, Morphology & Lexical Relations")
-
-            if not is_idiom and not is_sentence:
-                morph_box = SmoothGlassFrame(radius=18, variant="inner")
-                m_lay = QVBoxLayout(morph_box)
-                m_lay.setContentsMargins(18, 14, 18, 14)
-                m_lay.setSpacing(10)
-
-                root_w = morph.get("root", headword)
-                structure_txt = morph.get("structure", headword)
-                pref_txt = morph.get("prefix", "None")
-                suff_txt = morph.get("suffix", "None")
-
-                r_row = QHBoxLayout()
-                r_row_lbl = QLabel("<b>Root / Base Word:</b>")
-                r_row_lbl.setObjectName("BodyText")
-                r_row.addWidget(r_row_lbl)
-                r_row.addWidget(self._create_clickable_word_link(root_w))
-                r_row.addSpacing(18)
-
-                st_lbl = QLabel(f"<b>Structure:</b>  <span style='color:{accent};'>{structure_txt}</span>")
-                st_lbl.setTextFormat(Qt.TextFormat.RichText)
-                st_lbl.setObjectName("BodyText")
-                st_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                r_row.addWidget(st_lbl)
-                r_row.addStretch()
-                m_lay.addLayout(r_row)
-
-                affix_lbl = QLabel(
-                    f"<b>Prefix:</b> <span style='color:{accent};'>{pref_txt}</span>      \u2022      "
-                    f"<b>Suffix:</b> <span style='color:{accent};'>{suff_txt}</span>"
-                )
-                affix_lbl.setWordWrap(True)
-                affix_lbl.setTextFormat(Qt.TextFormat.RichText)
-                affix_lbl.setObjectName("BodyText")
-                affix_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                m_lay.addWidget(affix_lbl)
-
-                derived = data.get("derived_terms", [])
-                if derived:
-                    der_row = QHBoxLayout()
-                    der_row.setSpacing(8)
-                    d_title = QLabel("<b>Derived terms:</b>")
-                    d_title.setObjectName("BodyText")
-                    der_row.addWidget(d_title)
-                    for d_item in derived[:8]:
-                        der_row.addWidget(self._create_clickable_word_link(d_item))
-                    der_row.addStretch()
-                    m_lay.addLayout(der_row)
-
-                family_list = morph.get("family", [])
-                if family_list:
-                    fam_row = QHBoxLayout()
-                    fam_row.setSpacing(8)
-                    f_title = QLabel("<b>Word Family:</b>")
-                    f_title.setObjectName("BodyText")
-                    fam_row.addWidget(f_title)
-                    for f_item in family_list[:6]:
-                        fam_row.addWidget(self._create_clickable_word_link(f_item["word"], f"{f_item['pos']}: "))
-                    fam_row.addStretch()
-                    m_lay.addLayout(fam_row)
-
-                vbox3.addWidget(morph_box)
-
-            if syns:
-                syn_sub = SmoothGlassFrame(radius=18, variant="inner")
-                syn_lay = QVBoxLayout(syn_sub)
-                syn_lay.setContentsMargins(16, 14, 16, 14)
-                syn_lay.setSpacing(10)
-                st = QLabel("Synonyms")
-                st.setObjectName("CardTitle")
-                syn_lay.addWidget(st)
-                self._add_relation_boxes(syn_lay, syns)
-                vbox3.addWidget(syn_sub)
-
-            if ants:
-                ant_sub = SmoothGlassFrame(radius=18, variant="inner")
-                ant_lay = QVBoxLayout(ant_sub)
-                ant_lay.setContentsMargins(16, 14, 16, 14)
-                ant_lay.setSpacing(10)
-                at = QLabel("Antonyms")
-                at.setObjectName("CardTitle")
-                ant_lay.addWidget(at)
-                self._add_relation_boxes(ant_lay, ants)
-                vbox3.addWidget(ant_sub)
-
+            card3, vbox3, _ = self._create_glass_card(f"{sec_num}. Forms, Roots & Alternatives")
+            for sub in subsections:
+                vbox3.addWidget(sub)
             self.cards_layout.addWidget(card3)
 
         self.cards_layout.addStretch()

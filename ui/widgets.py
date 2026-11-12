@@ -1,9 +1,10 @@
 """Reusable glass-style widgets shared by the pages: frames, dialogs, popups, dropdowns, buttons."""
-from typing import Callable, List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QPoint, QRectF, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRectF, QSize, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFontMetrics, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
+    QApplication,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -20,14 +21,38 @@ from PyQt6.QtWidgets import (
 import lexical_engine
 from ui import theme
 from ui.config import SettingsManager
+from ui.marquee import CHECK_ROLE, MarqueeLabel, apply_marquee
 from ui.speaker import NeuralSpeaker
-from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS, VectorIcons, make_polished_font
+from ui.theme import PERSIAN_ALIGNMENT, THEME_COLORS, VectorIcons, make_polished_font, paint_soft_shadow
+
+POPUP_SHADOW = 14  # transparent margin around the popup cards, where their soft shadow is painted
 
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
 
 
 # === SECTION 6: REUSABLE GLASS UI COMPONENTS & HARMONIOUS EDIT DIALOG ===
+_focus_ring_watched = False
+
+
+def _watch_focus_rings() -> None:
+    """Repaint the search frames when focus enters or leaves their input (they draw a focus ring).
+    One application-wide connection, made once: a connection per frame would outlive deleted frames."""
+    global _focus_ring_watched
+    if _focus_ring_watched:
+        return
+    _focus_ring_watched = True
+
+    def repaint(old: Optional[QWidget], new: Optional[QWidget]) -> None:
+        for w in (old, new):
+            while w is not None:
+                if isinstance(w, SmoothGlassFrame) and w.variant == "search":
+                    w.update()
+                w = w.parentWidget()
+
+    QApplication.instance().focusChanged.connect(repaint)
+
+
 class SmoothGlassFrame(QFrame):
     def __init__(self, radius: int = 22, variant: str = "card", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -35,6 +60,12 @@ class SmoothGlassFrame(QFrame):
         self.variant = variant
         self.hovered = False
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if variant == "search":
+            _watch_focus_rings()
+
+    def _has_focus_inside(self) -> bool:
+        focus = QApplication.focusWidget()
+        return focus is not None and self.isAncestorOf(focus)
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
@@ -44,10 +75,12 @@ class SmoothGlassFrame(QFrame):
             bg = QColor(THEME_COLORS["bg_inner"])
         elif self.variant == "drawer":
             bg = QColor(THEME_COLORS["bg_drawer"])
+        elif self.variant == "popup":
+            bg = QColor(THEME_COLORS["bg_popup"])
         else:
             bg = QColor(THEME_COLORS["bg_card"])
 
-        if self.variant == "search" and self.hovered:
+        if self.variant == "search" and (self.hovered or self._has_focus_inside()):
             border_col = QColor(THEME_COLORS["border_focus"])
             pen_w = 1.5
         else:
@@ -92,7 +125,7 @@ class SmoothGlassEditDialog(QDialog):
         lay.setContentsMargins(24, 22, 24, 22)
         lay.setSpacing(14)
 
-        title = QLabel("Teach Ocean \u2014 Edit Persian Translation")
+        title = QLabel("Edit Persian Translation")
         title.setObjectName("CardTitle")
         lay.addWidget(title)
 
@@ -144,7 +177,7 @@ class GlassPopupMenu(QWidget):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         vbox = QVBoxLayout(self)
-        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setContentsMargins(POPUP_SHADOW, POPUP_SHADOW, POPUP_SHADOW, POPUP_SHADOW)
 
         self.card = SmoothGlassFrame(radius=16, variant="popup")
         c_lay = QVBoxLayout(self.card)
@@ -157,19 +190,37 @@ class GlassPopupMenu(QWidget):
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setMouseTracking(True)
+        apply_marquee(self.list_widget)
         self.list_widget.itemClicked.connect(self._on_item_clicked)
         c_lay.addWidget(self.list_widget)
         vbox.addWidget(self.card)
 
+    # Callers size and place the card; the window around it also holds the shadow margin.
+    def setFixedSize(self, w: int, h: int) -> None:
+        super().setFixedSize(w + 2 * POPUP_SHADOW, h + 2 * POPUP_SHADOW)
+
+    def move(self, pos: QPoint) -> None:
+        super().move(pos - QPoint(POPUP_SHADOW, POPUP_SHADOW))
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        paint_soft_shadow(p, QRectF(self.rect()).adjusted(POPUP_SHADOW, POPUP_SHADOW, -POPUP_SHADOW, -POPUP_SHADOW), 16.0, spread=POPUP_SHADOW - 2)
+        p.end()
+
     def open_at(self, options: List[str], current_val: str, anchor: QWidget, min_w: int = 200) -> None:
         self.list_widget.clear()
         for opt in options:
-            prefix = "\u2713  " if opt == current_val else "     "
-            it = QListWidgetItem(f"{prefix}{opt}")
+            it = QListWidgetItem(opt)
             it.setData(Qt.ItemDataRole.UserRole, opt)
+            it.setData(CHECK_ROLE, opt == current_val)
+            it.setSizeHint(QSize(0, 40))
             self.list_widget.addItem(it)
 
-        w = max(anchor.width(), min_w)
+        # As wide as the capsule, or as the longest option when that fits in a sensible width
+        # (anything longer than that scrolls on hover instead).
+        fm = QFontMetrics(self.list_widget.font())
+        longest = max((fm.horizontalAdvance(o) for o in options), default=0) + 16 + 24 + 12 + 16 + 8
+        w = max(anchor.width(), min_w, min(longest, 360))
         h = len(options) * 40 + 20
         self.setFixedSize(w, h)
         pos = anchor.mapToGlobal(QPoint(anchor.width() - w, anchor.height() + 6))
@@ -183,7 +234,25 @@ class GlassPopupMenu(QWidget):
             self.option_picked.emit(val)
 
 
+class ChevronIndicator(QWidget):
+    """The small drop-down arrow of the capsule dropdowns (drawn, so it follows the theme)."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(14, 14)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(QColor(THEME_COLORS["text_muted"]), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawPolyline(QPointF(3.0, 5.0), QPointF(7.0, 9.0), QPointF(11.0, 5.0))
+        p.end()
+
+
 class ModernGlassDropdown(QPushButton):
+    """Capsule dropdown. The current value is a MarqueeLabel: if it is wider than the capsule it
+    scrolls while the pointer is over the capsule."""
     valueChanged = pyqtSignal(str)
 
     def __init__(self, options: List[str], initial: str = "", parent: Optional[QWidget] = None) -> None:
@@ -194,13 +263,24 @@ class ModernGlassDropdown(QPushButton):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedHeight(38)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(16, 0, 12, 0)
+        row.setSpacing(8)
+        self.value_label = MarqueeLabel()
+        self.value_label.setObjectName("DropdownValue")
+        self.value_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.value_label.attach_hover(self)
+        row.addWidget(self.value_label, 1)
+        row.addWidget(ChevronIndicator(), 0, Qt.AlignmentFlag.AlignVCenter)
+
         self.popup = GlassPopupMenu(self)
         self.popup.option_picked.connect(self._on_picked)
         self.clicked.connect(self._open_popup)
         self._update_label()
 
     def _update_label(self) -> None:
-        self.setText(f"{self.current_val}  \u25be")
+        self.value_label.setText(self.current_val)
 
     def _open_popup(self) -> None:
         self.popup.open_at(self.options, self.current_val, self, min_w=self.width())
@@ -226,7 +306,7 @@ class GlassSuggestionPopup(QWidget):
         super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         vbox = QVBoxLayout(self)
-        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setContentsMargins(POPUP_SHADOW, POPUP_SHADOW, POPUP_SHADOW, POPUP_SHADOW)
 
         self.container = SmoothGlassFrame(radius=20, variant="popup")
         c_lay = QVBoxLayout(self.container)
@@ -239,9 +319,15 @@ class GlassSuggestionPopup(QWidget):
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setMouseTracking(True)
+        apply_marquee(self.list_widget)
         self.list_widget.itemClicked.connect(self._on_clicked)
         c_lay.addWidget(self.list_widget)
         vbox.addWidget(self.container)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        paint_soft_shadow(p, QRectF(self.rect()).adjusted(POPUP_SHADOW, POPUP_SHADOW, -POPUP_SHADOW, -POPUP_SHADOW), 20.0, spread=POPUP_SHADOW - 2)
+        p.end()
 
     def show_suggestions(self, items: List[str], anchor_widget: QWidget) -> None:
         if not items:
@@ -249,16 +335,17 @@ class GlassSuggestionPopup(QWidget):
             return
         self.list_widget.clear()
         for word in items:
-            it = QListWidgetItem(f"   {word}")
+            it = QListWidgetItem(word)
             it.setData(Qt.ItemDataRole.UserRole, word)
+            it.setSizeHint(QSize(0, 42))
             self.list_widget.addItem(it)
 
         row_h = 42
         total_h = min(len(items) * row_h + 24, 280)
-        self.setFixedWidth(anchor_widget.width())
-        self.setFixedHeight(total_h)
+        self.setFixedWidth(anchor_widget.width() + 2 * POPUP_SHADOW)
+        self.setFixedHeight(total_h + 2 * POPUP_SHADOW)
         pos = anchor_widget.mapToGlobal(QPoint(0, anchor_widget.height() + 8))
-        self.move(pos)
+        self.move(pos - QPoint(POPUP_SHADOW, POPUP_SHADOW))
         self.show()
 
     def _on_clicked(self, item: QListWidgetItem) -> None:
@@ -366,21 +453,17 @@ class PersianTranslationWidget(QWidget):
         super().enterEvent(event)
 
 
-def create_audio_button(text_to_speak: str, speaker: NeuralSpeaker, settings: SettingsManager,
-                        on_click: Optional[Callable[[], None]] = None) -> QPushButton:
-    """Speaker button for `text_to_speak`; `on_click` replaces the default of just speaking it."""
-    is_dark = settings.data.get("theme", "Dark Mode") == "Dark Mode"
-    icon_col = "#FFFFFF" if is_dark else "#0B57D0"
+def create_audio_button(text_to_speak: str, speaker: NeuralSpeaker, settings: SettingsManager) -> QPushButton:
+    """Speaker button for `text_to_speak`. The clip is synthesized in the background right away, so the click
+    plays it at once."""
+    speaker.prefetch(text_to_speak)
     btn = QPushButton()
-    btn.setIcon(VectorIcons.speaker_icon(icon_col))
+    btn.setIcon(VectorIcons.speaker_icon(THEME_COLORS["accent_fg"]))
     btn.setIconSize(QSize(18, 18))
     btn.setObjectName("AudioCircleButton")
     btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     btn.setFixedSize(34, 34)
     btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
     btn.setToolTip(f"Listen: {text_to_speak}")
-    if on_click is not None:
-        btn.clicked.connect(lambda _: on_click())
-    else:
-        btn.clicked.connect(lambda _, t=text_to_speak: speaker.speak(t))
+    btn.clicked.connect(lambda _, t=text_to_speak: speaker.speak(t))
     return btn

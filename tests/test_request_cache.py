@@ -229,8 +229,7 @@ class WholeLookupTest(unittest.TestCase):
         use_lexicon(self)
         patches = [
             mock.patch.object(le, "_send_request", network),
-            mock.patch.object(le, "wn", None),  # WordNet may be missing and is not what is under test
-            mock.patch.object(le, "LEMMATIZER", None),
+            mock.patch.object(le, "_probe_connectivity", return_value=True),  # the fake network is up
             mock.patch.object(le, "sentence_to_ipa", return_value=""),
             mock.patch.object(le, "_ct2_translate", return_value=""),
             mock.patch.object(le, "_ct2_translate_many", side_effect=lambda texts: [""] * len(texts)),
@@ -255,10 +254,17 @@ class WholeLookupTest(unittest.TestCase):
         self.assertTrue(net_calls)
         self.assertEqual(len(net_calls), len(set(net_calls)), "an identical request was sent twice")
 
-    def test_a_word_the_dictionary_translates_needs_no_request_for_it(self):
-        net = CountingNetwork(body=[])
+    def test_a_word_asks_google_once_and_is_then_remembered_for_good(self):
+        # Online, Google comes before Wiktionary for a word; its answer is cached permanently, so the second
+        # lookup (and any lookup offline) makes no request for it.
+        net = CountingNetwork(body=[[["کتاب خوب", "book", None, None]]])
         result = self.run_lookup("book", net)
-        self.assertEqual(result["persian_equivalent"], "کتاب")
+        self.assertEqual((result["persian_equivalent"], result["persian_source"]), ("کتاب خوب", le.FA_SOURCE_GOOGLE))
+        asked = [c for c in net.calls if "('q', 'book')" in c[2]]
+        self.assertEqual(len(asked), 1)
+        net.calls.clear()
+        again = le.analyze_with_dictionaries("book")
+        self.assertEqual(again["persian_equivalent"], "کتاب خوب")
         self.assertEqual([c for c in net.calls if "('q', 'book')" in c[2]], [])
 
     def test_two_lookups_in_a_row_do_not_share_responses(self):

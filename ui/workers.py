@@ -1,4 +1,5 @@
 """Background QThread workers, and the helpers that keep them alive until they finish."""
+import inspect
 import logging
 import os
 import sys
@@ -56,18 +57,26 @@ class SuggestionWorker(QThread):
 
 
 class EngineWorker(QThread):
+    """One lookup. `refresh=True` (the Refresh button) asks the engine for an improved result by querying the
+    online resources again; the first lookup of a term is always the best local result."""
     preview_ready = pyqtSignal(str, dict)  # the entry from local data, before the slower translations
     finished_success = pyqtSignal(str, dict)
     finished_error = pyqtSignal(str)
 
-    def __init__(self, term: str) -> None:
+    def __init__(self, term: str, refresh: bool = False) -> None:
         super().__init__()
         self.term = term
+        self.refresh = refresh
 
     def run(self) -> None:
         try:
+            kwargs = {}
+            # The engine's refresh option (online sources, bypassing its caches) is passed once it has one;
+            # until then a refresh is simply a fresh lookup that skips the saved copy.
+            if self.refresh and "refresh" in inspect.signature(lexical_engine.analyze_with_dictionaries).parameters:
+                kwargs["refresh"] = True
             res = lexical_engine.analyze_with_dictionaries(
-                self.term, on_preview=lambda d: self.preview_ready.emit(d.get("headword", self.term), d))
+                self.term, on_preview=lambda d: self.preview_ready.emit(d.get("headword", self.term), d), **kwargs)
             self.finished_success.emit(res.get("headword", self.term), res)
         except Exception as exc:
             log.exception("Lookup failed for %r", self.term)

@@ -1,4 +1,4 @@
-# One-time Windows setup: venv, Python deps, WordNet, Kokoro voice, offline translator, Ocean's local
+# One-time Windows setup: venv, Python deps, Kokoro voice, offline translator, Ocean's local
 # dictionary database, fonts.
 # Run from this folder:  powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
 #   -Urban FILE   also import an Urban Dictionary dump (CSV or JSON; see tools\build_lexicon_db.py)
@@ -26,12 +26,6 @@ if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
 & .\.venv\Scripts\python.exe -m pip install --upgrade pip
 & .\.venv\Scripts\python.exe -m pip install -r requirements.lock
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
-
-# lexical_engine.py looks in .\nltk_data first. NLTK_DATA must name the target dir
-# or newer NLTK refuses to download there ("Unauthorized path").
-$env:NLTK_DATA = Join-Path $PSScriptRoot "nltk_data"
-# WordNet 3.1 gives synonyms and antonyms; it needs the 3.0 data too, which the lemmatizer uses.
-& .\.venv\Scripts\python.exe -m nltk.downloader -d $env:NLTK_DATA wordnet wordnet31 omw-1.4
 
 $kokoroUrl = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 # int8 model (~88 MB); an existing full-size kokoro-v1.0.onnx is used as is and not replaced.
@@ -65,6 +59,11 @@ if (-not (Test-Path "ocean_lexicon.db")) {
     $buildArgs = @("tools\build_lexicon_db.py", "--out", "ocean_lexicon.db", "--kaikki", "$dl\kaikki.jsonl.gz",
                    "--tatoeba-dir", "$dl\tatoeba", "--opensubtitles", "$dl\opensubtitles-en-fa.zip")
     if ($Urban) { $buildArgs += @("--urban", (Resolve-Path $Urban).Path) }
+    # The bundled slang table and the pre-translated idioms, when they sit next to this script.
+    if ((-not $Urban) -and (Test-Path "ocean_slang.db")) { $buildArgs += @("--slang-db", "ocean_slang.db") }
+    foreach ($idioms in @("data\idioms_fa.tsv.gz", "idioms_fa.tsv", "idioms_fa.jsonl")) {
+        if (Test-Path $idioms) { $buildArgs += @("--idioms-fa", $idioms); break }
+    }
     & .\.venv\Scripts\python.exe @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "Building ocean_lexicon.db failed" }
     Remove-Item $dl -Recurse -Force
@@ -80,22 +79,6 @@ if ($WithSlm) {
     } else {
         Write-Warning "Could not install llama-cpp-python; Ocean uses the NLLB translator offline instead."
     }
-}
-
-# UI fonts (SIL OFL): Inter for English, Vazirmatn for Persian.
-if (-not ((Test-Path "fonts\Vazirmatn-Medium.ttf") -and (Test-Path "fonts\Inter-Medium.ttf"))) {
-    $tmp = Join-Path $env:TEMP "ocean_fonts"
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $tmp, "fonts" | Out-Null
-    Invoke-WebRequest -UseBasicParsing "https://github.com/rastikerdar/vazirmatn/releases/download/v33.003/vazirmatn-v33.003.zip" -OutFile "$tmp\vazirmatn.zip"
-    Invoke-WebRequest -UseBasicParsing "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip" -OutFile "$tmp\inter.zip"
-    Expand-Archive "$tmp\vazirmatn.zip" "$tmp\vazirmatn" -Force
-    Expand-Archive "$tmp\inter.zip" "$tmp\inter" -Force
-    foreach ($w in @("Regular", "Medium", "Bold")) {
-        Copy-Item "$tmp\vazirmatn\fonts\ttf\Vazirmatn-$w.ttf" "fonts\" -Force
-        Copy-Item "$tmp\inter\extras\ttf\Inter-$w.ttf" "fonts\" -Force
-    }
-    Remove-Item $tmp -Recurse -Force
 }
 
 if (-not (Test-Path "ocean.ico")) {

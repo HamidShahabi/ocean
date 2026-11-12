@@ -36,16 +36,18 @@ def main() -> None:
     register_custom_fonts()
     window = MainWindow()
     window.show()
-    QTimer.singleShot(0, lexical_engine.preload_wordnet)  # once the event loop is running
     QTimer.singleShot(0, lexical_engine.preload_offline_translator)
 
     instance_server = desktop_lookup.InstanceServer(app)
     instance_server.message_received.connect(window.handle_external_lookup)
     instance_server.listen()
     if sys.platform == "win32":
-        hotkey = desktop_lookup.WindowsHotkey(lambda: window.handle_external_lookup({"action": "lookup"}))
-        if hotkey.register():
-            app.installNativeEventFilter(hotkey)
+        # Ctrl+C twice on a selection (the text arrives with the event); Alt+Q / Ctrl+Alt+O look up the clipboard.
+        desktop_lookup.DoubleCopyWatcher(   # owned by `app`, so it lives as long as the app
+            app.clipboard(), lambda text: window.handle_external_lookup({"action": "lookup", "text": text}), app)
+        hotkeys = desktop_lookup.WindowsHotkeys(lambda: window.handle_external_lookup({"action": "lookup"}))
+        if hotkeys.register():
+            app.installNativeEventFilter(hotkeys)
     if message["action"] == "lookup":
         window.handle_external_lookup(message)
     exit_app(app.exec())

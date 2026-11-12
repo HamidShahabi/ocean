@@ -12,16 +12,10 @@ cffi==2.1.1
     # via soundfile
 charset-normalizer==3.5.2
     # via requests
-click==8.5.0
-    # via nltk
 cloudpickle==3.1.2
     # via joblib
-colorama==0.4.6 ; sys_platform == 'win32'
-    # via tqdm
 ctranslate2==4.8.4
     # via -r requirements.txt
-defusedxml==0.7.1
-    # via nltk
 dlinfo==2.0.0
     # via phonemizer
 eng-to-ipa==0.0.2
@@ -33,15 +27,11 @@ flatbuffers==25.12.19
 idna==3.20
     # via requests
 joblib==1.6.0
-    # via
-    #   nltk
-    #   phonemizer
+    # via phonemizer
 kokoro-onnx==0.6.1
     # via -r requirements.txt
 macholib==1.16.4 ; sys_platform == 'darwin'
     # via pyinstaller
-nltk==3.10.4
-    # via -r requirements.txt
 numpy==2.5.4
     # via
     #   -r requirements.txt
@@ -80,8 +70,6 @@ pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
     # via pyinstaller
 pyyaml==6.0.3
     # via ctranslate2
-regex==2026.9.29
-    # via nltk
 requests==2.34.2
     # via -r requirements.txt
 sentencepiece==0.2.2
@@ -90,8 +78,6 @@ setuptools==84.2.1
     # via pyinstaller
 soundfile==0.14.0
     # via -r requirements.txt
-tqdm==4.70.1
-    # via nltk
 typing-extensions==4.16.0
     # via
     #   phonemizer

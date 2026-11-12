@@ -1,8 +1,8 @@
 """The contract every dictionary source follows, the partial entry it fills and the registry
-that runs the enabled ones and merges what they return."""
+that runs the ones that apply and merges what they return."""
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import lexical_engine as le
 
@@ -10,13 +10,19 @@ import lexical_engine as le
 @dataclass
 class LookupContext:
     """What a source needs to know about the lookup it is part of."""
-    term: str
+    term: str                     # what to look up: for an idiom matched by lexicon_db.match_phrase, its dictionary form
     is_idiom: bool = False        # multi-word phrase
     root_lemma: str = ""
+    typed: str = ""               # what was typed, when that differs from term ("dial it down" for "dial down")
 
     def __post_init__(self) -> None:
         if not self.root_lemma:
             self.root_lemma = self.term
+
+    @property
+    def aliases(self) -> List[str]:
+        """Other spellings of the term to look sentences and slang up under."""
+        return [self.typed] if self.typed and self.typed.lower() != self.term.lower() else []
 
 
 @dataclass
@@ -24,12 +30,15 @@ class PartialEntry:
     """The slice of a dictionary entry one source could fill in; merge_entries() combines them."""
     ipa_us: str = ""
     primary_pos: str = ""
-    senses: List[Dict[str, str]] = field(default_factory=list)            # {"pos", "def", "example_en"}
-    syns: List[Dict[str, str]] = field(default_factory=list)              # {"term", "sense"}: grouped by sense
-    ants: List[Dict[str, str]] = field(default_factory=list)              # {"term", "sense"}
+    senses: List[Dict[str, Any]] = field(default_factory=list)            # {"pos", "def", "example_en", "klass", "raw_def", "tags"}
+    syns: List[Dict[str, Any]] = field(default_factory=list)              # {"term", "pos", "raw_def", "hint", "tags"}: see the engine
+    ants: List[Dict[str, Any]] = field(default_factory=list)              # same
     collocations: List[Dict[str, str]] = field(default_factory=list)      # {"term", "example_en"}
     derived: List[str] = field(default_factory=list)                      # derived terms and compounds
-    examples: List[Dict[str, str]] = field(default_factory=list)          # {"en", "fa"} sentence pairs
+    related: List[str] = field(default_factory=list)                      # related terms
+    forms: List[Dict[str, str]] = field(default_factory=list)             # {"form", "label"}: inflections
+    alternatives: List[str] = field(default_factory=list)                 # alternative spellings and forms
+    examples: List[Dict[str, str]] = field(default_factory=list)          # {"en", "fa", "corpus"} sentence pairs
     frequency: Optional[float] = None                                     # occurrences per million words
 
 
@@ -70,6 +79,9 @@ def merge_entries(entries: Iterable[PartialEntry]) -> PartialEntry:
         merged.ants += e.ants
         merged.collocations += e.collocations
         merged.derived += e.derived
+        merged.related += e.related
+        merged.forms += e.forms
+        merged.alternatives += e.alternatives
         merged.examples += e.examples
     return merged
 
@@ -80,7 +92,6 @@ class SourceRegistry:
 
     def __init__(self) -> None:
         self._sources: List[DictionarySource] = []
-        self._disabled: Set[str] = set()
 
     def register(self, source: DictionarySource) -> DictionarySource:
         if not source.name or source.name in self.names():
@@ -103,22 +114,8 @@ class SourceRegistry:
                 return s
         raise KeyError(name)
 
-    def set_enabled(self, name: str, enabled: bool) -> None:
-        self.get(name)  # unknown names are a programming error, not a silent no-op
-        (self._disabled.discard if enabled else self._disabled.add)(name)
-
-    def is_enabled(self, name: str) -> bool:
-        return name not in self._disabled
-
-    def any_enabled(self) -> bool:
-        """False when the user has switched every source off."""
-        return any(s.name not in self._disabled for s in self._sources)
-
-    def disabled_names(self) -> List[str]:
-        return sorted(self._disabled)
-
     def active(self, ctx: LookupContext) -> List[DictionarySource]:
-        return [s for s in self._sources if s.name not in self._disabled and s.applies(ctx)]
+        return [s for s in self._sources if s.applies(ctx)]
 
     def run(self, ctx: LookupContext) -> PartialEntry:
         """Look the term up in every active source at once (a source with `needs` waits for those) and merge."""
